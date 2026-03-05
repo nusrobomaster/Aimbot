@@ -1,0 +1,22 @@
+[2026-03-05 16:29:15.799] [info] HikRobot's daemon thread started.
+[2026-03-05 16:29:16.447] [info] HikRobot's capture thread started.
+[2026-03-05 16:29:16.721] [warning] [Tracker] Large dt: 0.147s
+[2026-03-05 16:29:32.444] [info] Frame: 300, FPS: 19.8
+[2026-03-05 16:29:35.613] [debug] [Target] r=0.038, l=0.000
+[2026-03-05 16:29:35.613] [debug] [Tracker] Target diverged!
+[2026-03-05 16:29:44.028] [warning] [Tracker] Large dt: 0.113s
+[2026-03-05 16:29:46.392] [debug] [Target] r=0.030, l=0.000
+[2026-03-05 16:29:46.392] [debug] [Tracker] Target diverged!
+[2026-03-05 16:29:48.282] [info] Frame: 600, FPS: 18.7
+[2026-03-05 16:29:51.873] [debug] [Target] r=0.022, l=0.000
+[2026-03-05 16:29:51.873] [debug] [Tracker] Target diverged!
+[2026-03-05 16:29:57.432] [warning] MV_CC_GetImageBuffer failed: 0x80000007
+[2026-03-05 16:29:57.432] [info] HikRobot's capture thread stopped.
+[2026-03-05 16:29:57.616] [info] Reset usb successfully :)
+[2026-03-05 16:29:57.951] [info] HikRobot's capture thread started.
+[2026-03-05 16:29:57.992] [warning] [Tracker] Large dt: 0.651s
+[2026-03-05 16:30:02.420] [info] Frame: 900, FPS: 26.9
+[2026-03-05 16:30:13.544] [info] Program terminated successfully.
+[2026-03-05 16:30:13.568] [info] HikRobot's capture thread stopped.
+[2026-03-05 16:30:13.578] [info] HikRobot's daemon thread stopped.
+[2026-03-05 16:30:13.581] [info] HikRobot destructed.

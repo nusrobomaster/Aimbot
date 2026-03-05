@@ -1,0 +1,22 @@
+[2026-03-05 16:22:25.345] [info] HikRobot's daemon thread started.
+[2026-03-05 16:22:26.016] [info] HikRobot's capture thread started.
+[2026-03-05 16:22:42.349] [info] Frame: 300, FPS: 18.8
+[2026-03-05 16:22:58.512] [info] Frame: 600, FPS: 18.1
+[2026-03-05 16:23:14.755] [info] Frame: 900, FPS: 18.0
+[2026-03-05 16:23:30.831] [info] Frame: 1200, FPS: 19.9
+[2026-03-05 16:23:44.707] [debug] [Target] r=-0.641, l=-0.841
+[2026-03-05 16:23:44.707] [debug] [Tracker] Target diverged!
+[2026-03-05 16:23:44.892] [debug] [Target] r=-0.897, l=0.000
+[2026-03-05 16:23:44.892] [debug] [Tracker] Target diverged!
+[2026-03-05 16:23:59.225] [info] Frame: 1500, FPS: 18.9
+[2026-03-05 16:24:17.249] [debug] [Target] r=2.141, l=0.000
+[2026-03-05 16:24:17.249] [debug] [Tracker] Target diverged!
+[2026-03-05 16:24:17.467] [debug] [Target] r=-0.152, l=0.000
+[2026-03-05 16:24:17.467] [debug] [Tracker] Target diverged!
+[2026-03-05 16:24:19.878] [debug] [Target] r=-0.264, l=-0.464
+[2026-03-05 16:24:19.878] [debug] [Tracker] Target diverged!
+[2026-03-05 16:24:48.393] [info] Frame: 1800, FPS: 1.7
+[2026-03-05 16:25:07.881] [info] Program terminated successfully.
+[2026-03-05 16:25:07.970] [info] HikRobot's capture thread stopped.
+[2026-03-05 16:25:07.980] [info] HikRobot's daemon thread stopped.
+[2026-03-05 16:25:07.982] [info] HikRobot destructed.
