@@ -5,6 +5,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <vector>
+#include <cstdint>
 #include <Eigen/Geometry>
 #include <string>
 
@@ -32,17 +34,31 @@ public:
     Eigen::Quaterniond getQuaternionAt(std::chrono::steady_clock::time_point tp) const;
 
 private:
+    // Parsed IMU frame data (matches H30 protocol TLV fields)
+    struct IMUFrame {
+        uint16_t seq = 0;
+
+        bool has_euler = false;
+        float euler_deg[3] = {0.0f, 0.0f, 0.0f};  // pitch, roll, yaw
+
+        bool has_quat = false;
+        float quat[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // w, x, y, z
+    };
+
     void workerFunction();
     bool openSerial();
     void closeSerial();
     int setInterfaceAttrs(int fd, int speed, float timeout_sec);
+
+    // Protocol helpers
+    bool readExact(uint8_t* buf, size_t n);
+    bool readFrame(IMUFrame& out);
 
     // Serial port members
     std::string device_;
     int baudrate_;
     float timeout_sec_;
     int fd_;                                 // file descriptor for serial port
-    static constexpr size_t READ_BUF_SIZE = 256;
 
     // Ring buffer for interpolated samples
     struct Sample {

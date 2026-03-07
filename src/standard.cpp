@@ -222,8 +222,8 @@ void displayAutoAimResults(cv::Mat& img,
     cv::putText(display_img, info_text, cv::Point(10, 30), 
                 cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
     
-    std::string ypr_text = fmt::format("Yaw: {:.1f}° | Pitch: {:.1f}°", 
-                                       ypr[0], ypr[1]);
+    std::string ypr_text = fmt::format("Gimbal Yaw: {:.1f}° | Pitch: {:.1f}°", 
+                                       ypr[0] * 180.0 / M_PI, ypr[1] * 180.0 / M_PI);
     cv::putText(display_img, ypr_text, cv::Point(10, 60), 
                 cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(200, 200, 100), 1);
     
@@ -322,8 +322,9 @@ void displayAutoAimResults(cv::Mat& img,
     cv::circle(display_img, center, 8, cv::Scalar(0, 255, 0), 1);
     
     // 6. Draw command information
-    std::string cmd_text = fmt::format("Cmd: Y{:.2f}° P{:.2f}°", 
-                                       command.yaw , command.pitch);
+    std::string cmd_text = fmt::format("Cmd: Y{:.2f}° P{:.2f}° (rad: {:.4f}, {:.4f})", 
+                                       command.yaw * 180.0 / M_PI, command.pitch * 180.0 / M_PI,
+                                       command.yaw, command.pitch);
     cv::putText(display_img, cmd_text, cv::Point(10, display_img.rows - 60),
                 cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 255, 0), 2);
     
@@ -340,8 +341,11 @@ void displayAutoAimResults(cv::Mat& img,
     
     // 7. Draw predicted aim direction from command
     if (command.control && (std::abs(command.yaw) > 0.001 || std::abs(command.pitch) > 0.001)) {
-        int aim_x = center.x + static_cast<int>(command.yaw * 500);  // Scaled for visibility
-        int aim_y = center.y + static_cast<int>(command.pitch * 500);
+        // command.yaw/pitch are in radians, scale appropriately for arrow display
+        // Positive yaw = turn left = screen X decreases, so negate yaw
+        // Positive pitch = aim up = screen Y decreases, so add pitch (screen Y is inverted)
+        int aim_x = center.x - static_cast<int>(command.yaw * 180.0 / M_PI * 10);
+        int aim_y = center.y + static_cast<int>(command.pitch * 180.0 / M_PI * 10);
         cv::arrowedLine(display_img, center, cv::Point(aim_x, aim_y), 
                        cv::Scalar(255, 0, 255), 2, 8, 0, 0.1);
     }
@@ -390,8 +394,9 @@ void displayAutoAimResults(cv::Mat& img,
         tools::logger()->info("=== Debug Info ===");
         tools::logger()->info("Armors detected: {}", armors.size());
         tools::logger()->info("Targets tracked: {}", targets.size());
-        tools::logger()->info("Command: yaw={:.3f}°, pitch={:.3f}°, shoot={}, control={}", 
-                             command.yaw, command.pitch, 
+        tools::logger()->info("Command: yaw={:.3f}° ({:.4f} rad), pitch={:.3f}° ({:.4f} rad), shoot={}, control={}", 
+                             command.yaw * 180.0 / M_PI, command.yaw,
+                             command.pitch * 180.0 / M_PI, command.pitch,
                              command.shoot, command.control);
         tools::logger()->info("Gimbal YPR: [{:.1f}°, {:.1f}°, {:.1f}°]", 
                              ypr[0], ypr[1], ypr[2]);
@@ -445,7 +450,7 @@ int main(int argc, char * argv[])
 
   io::Camera camera(config_path);
   // io::CBoard cboard(config_path); // Uncomment if using serial communication
-  H30IMU imu("/dev/ttyACM0", 460800);
+  H30IMU imu("/dev/ttyACM1", 460800);
   if (!imu.start()) {
     tools::logger()->warn("Failed to start external IMU");
 }
@@ -458,7 +463,7 @@ int main(int argc, char * argv[])
   // ============ USB COMMUNICATION SETUP ============
   calibur::USBCommunication usb_comm;
 
-  std::string usb_port = "/dev/ttyACM1";
+  std::string usb_port = "/dev/ttyACM0";
   int baudrate = 115200;  // Match your MCU baud rate
   
   std::cout << "\n[USB] Attempting to open " << usb_port << " at " << baudrate << " baud" << std::endl;
@@ -523,25 +528,97 @@ int main(int argc, char * argv[])
   std::cout << "  c/C   - Clear console" << std::endl;
   std::cout << "===================================\n" << std::endl;
 
+  // ============ IMU TARE (ZERO REFERENCE) ============
+  // The H30 IMU uses an absolute NED reference frame (magnetometer + gravity).
+  // Unlike the CBoard whose reference aligns with the gimbal at power-on,
+  // the H30 has a fixed NED reference that causes constant pitch/roll offsets.
+  // Solution: capture the startup quaternion and subtract it, so the "world"
+  // frame starts aligned with the gimbal's current heading.
+  std::cout << "[IMU] Capturing zero reference (keep gimbal STILL and LEVEL)..." << std::endl;
+  std::this_thread::sleep_for(std::chrono::milliseconds(500)); // let IMU stabilize
+
+  Eigen::Quaterniond q_zero = Eigen::Quaterniond::Identity();
+  {
+    const int TARE_SAMPLES = 100;
+    Eigen::Vector4d q_sum = Eigen::Vector4d::Zero();
+    auto tare_start = std::chrono::steady_clock::now();
+    for (int i = 0; i < TARE_SAMPLES; ++i) {
+      auto tp = std::chrono::steady_clock::now();
+      Eigen::Quaterniond qs = imu.getQuaternionAt(tp);
+      Eigen::Vector4d c = qs.coeffs();  // (x, y, z, w) in Eigen
+      if (i == 0) {
+        q_sum = c;
+      } else {
+        if (c.dot(q_sum) < 0) c = -c;  // keep consistent hemisphere
+        q_sum += c;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    q_zero.coeffs() = q_sum.normalized();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tare_start).count();
+    std::cout << "[IMU] Zero reference captured in " << elapsed_ms << "ms: q0 = ("
+              << q_zero.w() << ", " << q_zero.x() << ", "
+              << q_zero.y() << ", " << q_zero.z() << ")" << std::endl;
+  }
+  // ===================================================
+
   while (!exiter.exit()) {
     camera.read(img, t);
-    // q = cboard.imu_at(t - 1ms); // Uncomment if using IMU
-    Eigen::Quaterniond q = imu.getQuaternionAt(t - 1ms);
-    
-    // For testing, use identity quaternion if no IMU
-    // if (q.coeffs().norm() == 0) {
-    //     q = Eigen::Quaterniond::Identity();
-    // }
+    // q = cboard.imu_at(t - 1ms); // Uncomment if using CBoard IMU
 
-    solver.set_R_gimbal2world(q);
+    // H30 IMU: get raw quaternion, then subtract the zero reference.
+    // q_tared = q_zero^-1 * q_raw  →  identity when gimbal is at startup pose,
+    // so the world frame starts aligned with the gimbal (pitch=0, roll=0).
+    Eigen::Quaterniond q_raw = imu.getQuaternionAt(t - 1ms);
+    Eigen::Quaterniond q_tared = q_zero.conjugate() * q_raw;
+
+    solver.set_R_gimbal2world(q_tared);
 
     Eigen::Vector3d ypr = tools::eulers(solver.R_gimbal2world(), 2, 1, 0);
+
+    // Periodic IMU diagnostic: verify quaternion orientation makes sense
+    // When you yaw RIGHT  → ypr[0] should DECREASE
+    // When you pitch UP   → ypr[1] should INCREASE
+    // At startup pose     → ypr[1] and ypr[2] should be ~0
+    static int imu_diag_count = 0;
+    if (++imu_diag_count % 200 == 0) {
+      std::cout << "[IMU] Gimbal YPR(deg): " 
+                << ypr[0] * 180.0 / M_PI << ", "
+                << ypr[1] * 180.0 / M_PI << ", "
+                << ypr[2] * 180.0 / M_PI << std::endl;
+    }
 
     auto armors = detector.detect(img);
 
     auto targets = tracker.track(armors, t, true);
 
     auto command = aimer.aim(targets, t, 23.0);
+
+    // ============ DEBUG: Print the full chain every 50 frames ============
+    static int debug_chain_count = 0;
+    if (++debug_chain_count % 50 == 0 && !targets.empty() && command.control) {
+        Eigen::Vector3d aim_xyz = aimer.debug_aim_point.xyza.head(3);
+        double target_pixel_x = 0;
+        // Get the first armor's pixel center for reference
+        if (!armors.empty() && armors.front().points.size() >= 4) {
+            for (const auto& p : armors.front().points) target_pixel_x += p.x;
+            target_pixel_x /= 4.0;
+        }
+        double img_center_x = img.cols / 2.0;
+        
+        std::cout << "[DEBUG CHAIN] "
+                  << "pixel_x=" << target_pixel_x << " (center=" << img_center_x 
+                  << (target_pixel_x > img_center_x ? " →RIGHT" : " ←LEFT") << ")"
+                  << " | aim_xyz=(" << aim_xyz[0] << "," << aim_xyz[1] << "," << aim_xyz[2] << ")"
+                  << " | cmd_yaw=" << command.yaw * 180.0 / M_PI << "°"
+                  << " | gimbal_yaw=" << ypr[0] * 180.0 / M_PI << "°"
+                  << " | yaw_err=" << tools::limit_rad(command.yaw - ypr[0]) * 180.0 / M_PI << "°"
+                  << " | pitch_cmd=" << command.pitch * 180.0 / M_PI << "°"
+                  << " | gimbal_pitch=" << ypr[1] * 180.0 / M_PI << "°"
+                  << std::endl;
+    }
+    // =====================================================================
     
     // ============ SHOOTER DECISION ============
     bool should_shoot = false;
@@ -586,11 +663,31 @@ int main(int argc, char * argv[])
             
             // ALWAYS send gimbal command (either target angles or zero)
             if (aimer.debug_aim_point.valid && !targets.empty()) {
-                // Valid target - send gimbal command with target angles
-                gimbal_sent = usb_comm.sendGimbalCommand(
-                    command.yaw,      // yaw in radians
-                    command.pitch     // pitch in radians
-                );
+                // The aimer outputs ABSOLUTE world-frame angles, but the MCU
+                // has no IMU and cannot compute the error itself.
+                // We compute the relative error here:
+                //   yaw_error  = target_world_yaw  - gimbal_world_yaw
+                //   pitch_error = desired_pitch     - gimbal_world_pitch
+                //
+                // Sign convention conversion (FLU → MCU):
+                //   Aimbot FLU: positive yaw = LEFT,  positive pitch = UP
+                //   MCU:        positive yaw = RIGHT, positive pitch = UP
+                //   → negate yaw error for MCU
+                //
+                // command.pitch from aimer = -(trajectory_pitch + offset),
+                // so desired_pitch = -command.pitch.
+                // pitch_error = desired_pitch - current_pitch
+                //             = -command.pitch - ypr[1]
+                //             = -(command.pitch + ypr[1])
+
+                double yaw_error = tools::limit_rad(command.yaw - ypr[0]);
+                double pitch_error = -(command.pitch + ypr[1]);
+
+                // Negate yaw to convert FLU → MCU convention (left-positive → right-positive)
+                float yaw_to_send   = static_cast<float>(-yaw_error);
+                float pitch_to_send = static_cast<float>(pitch_error);
+
+                gimbal_sent = usb_comm.sendGimbalCommand(yaw_to_send, pitch_to_send);
             } else {
                 // No target - send zero gimbal command (gimbal stays still)
                 gimbal_sent = usb_comm.sendGimbalCommand(0.0f, 0.0f);
@@ -627,9 +724,13 @@ int main(int argc, char * argv[])
                             distance = target.armor_xyza_list()[0].head(3).norm();
                         }
                         
-                        std::cout << "[USB] Sent: yaw=" << command.yaw * 180.0f / M_PI 
-                                 << "° pitch=" << command.pitch * 180.0f / M_PI
-                                 << "° fire=" << (int)current_fire
+                        double yaw_err = tools::limit_rad(command.yaw - ypr[0]);
+                        double pitch_err = command.pitch - ypr[1];
+                        std::cout << "[USB] Sent: yaw_err=" << -yaw_err * 180.0 / M_PI 
+                                 << "° pitch_err=" << pitch_err * 180.0 / M_PI
+                                 << "° (cmd_yaw=" << command.yaw * 180.0 / M_PI
+                                 << "° gimbal_yaw=" << ypr[0] * 180.0 / M_PI
+                                 << "°) fire=" << (int)current_fire
                                  << " dist=" << distance << "m" << std::endl;
                     }
                 } else {

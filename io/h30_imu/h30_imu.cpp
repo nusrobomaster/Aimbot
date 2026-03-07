@@ -4,7 +4,48 @@
 #include <unistd.h>       // read, write, close
 #include <termios.h>      // tcgetattr, tcsetattr, cfsetispeed, etc.
 #include <cstring>        // memset
-#include <iostream>       // for error logging (replace with your logger)
+#include <cerrno>
+#include <iostream>
+#include <cmath>
+#include <vector>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// ---- H30 Protocol Constants ----
+static constexpr uint8_t HDR0        = 0x59;
+static constexpr uint8_t HDR1        = 0x53;
+static constexpr uint8_t MAX_PAYLOAD = 255;
+
+// TLV data IDs
+static constexpr uint8_t ID_EULER = 0x40;  // 12 bytes: pitch, roll, yaw (int32 × 1e-6 deg)
+static constexpr uint8_t ID_QUAT  = 0x41;  // 16 bytes: w, x, y, z   (int32 × 1e-6)
+
+// ---- Little-endian helpers ----
+static inline uint16_t read_u16_le(const uint8_t *p) {
+    return static_cast<uint16_t>(p[0]) |
+           static_cast<uint16_t>(p[1]) << 8;
+}
+
+static inline int32_t read_i32_le(const uint8_t *p) {
+    uint32_t v = static_cast<uint32_t>(p[0])
+               | (static_cast<uint32_t>(p[1]) << 8)
+               | (static_cast<uint32_t>(p[2]) << 16)
+               | (static_cast<uint32_t>(p[3]) << 24);
+    return static_cast<int32_t>(v);
+}
+
+// ---- Fletcher-like checksum ----
+static void fletcher_checksum(const std::vector<uint8_t> &data,
+                              uint8_t &ck1, uint8_t &ck2) {
+    ck1 = 0;
+    ck2 = 0;
+    for (uint8_t b : data) {
+        ck1 = static_cast<uint8_t>((ck1 + b) & 0xFF);
+        ck2 = static_cast<uint8_t>((ck2 + ck1) & 0xFF);
+    }
+}
 
 // Utility to convert baud rate constant (e.g., B115200) from integer speed.
 // You may need to expand this table for other baud rates.
@@ -100,57 +141,175 @@ int H30IMU::setInterfaceAttrs(int fd, int speed, float timeout_sec) {
 }
 
 void H30IMU::workerFunction() {
-    // Buffer for raw bytes
-    uint8_t raw_buf[READ_BUF_SIZE];
-
-    // --------------------------------------------------------------------
-    // TODO: Define your IMU's binary protocol here.
-    // You need to implement a state machine that reads bytes,
-    // finds packet boundaries, and extracts:
-    //   - quaternion (4 floats, probably in [w, x, y, z] or [x, y, z, w])
-    //   - timestamp (optional, microseconds since some epoch)
-    // Then push a Sample with that timestamp and quaternion.
-    //
-    // Below is a **placeholder** that assumes each read returns a complete
-    // packet of 16 bytes (4 floats). You must replace it with real parsing.
-    // --------------------------------------------------------------------
-
     while (running_) {
-        ssize_t n = read(fd_, raw_buf, sizeof(raw_buf));
-        if (n <= 0) {
-            // No data or error – sleep a bit and retry
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        IMUFrame frame;
+        if (!readFrame(frame)) {
             continue;
         }
 
-        // --- Placeholder parsing (replace with your actual protocol) ---
-        // Assume each packet is exactly 16 bytes: 4 floats, little‑endian,
-        // in order [w, x, y, z]. Also assume the packet starts at raw_buf[0].
-        if (n >= 16) {
-            // Convert bytes to floats (assuming little‑endian)
-            float* pf = reinterpret_cast<float*>(raw_buf);
-            float w = pf[0];
-            float x = pf[1];
-            float y = pf[2];
-            float z = pf[3];
+        Eigen::Quaterniond q = Eigen::Quaterniond::Identity();
+        bool got_orientation = false;
 
-            // Optional: timestamp could be another 8 bytes (uint64_t)
-            // uint64_t ts_us = *reinterpret_cast<uint64_t*>(raw_buf + 16);
-
-            Sample sample;
-            sample.timestamp = std::chrono::steady_clock::now();  // use system time
-            sample.quat = Eigen::Quaterniond(w, x, y, z).normalized();
-
-            // Add to ring buffer
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                buffer_.push_back(sample);
-                while (buffer_.size() > max_buffer_size_)
-                    buffer_.pop_front();
-            }
+        // Prefer quaternion if available
+        if (frame.has_quat) {
+            q = Eigen::Quaterniond(
+                static_cast<double>(frame.quat[0]),   // w
+                static_cast<double>(frame.quat[1]),   // x
+                static_cast<double>(frame.quat[2]),   // y
+                static_cast<double>(frame.quat[3])    // z
+            ).normalized();
+            got_orientation = true;
         }
-        // -----------------------------------------------------------------
+        // Fallback: convert euler angles to quaternion
+        else if (frame.has_euler) {
+            double pitch = frame.euler_deg[0] * M_PI / 180.0;
+            double roll  = frame.euler_deg[1] * M_PI / 180.0;
+            double yaw   = frame.euler_deg[2] * M_PI / 180.0;
+            q = Eigen::AngleAxisd(yaw,   Eigen::Vector3d::UnitZ()) *
+                Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+                Eigen::AngleAxisd(roll,  Eigen::Vector3d::UnitX());
+            q.normalize();
+            got_orientation = true;
+        }
+
+        if (got_orientation) {
+            Sample sample;
+            sample.timestamp = std::chrono::steady_clock::now();
+            sample.quat = q;
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            buffer_.push_back(sample);
+            while (buffer_.size() > max_buffer_size_)
+                buffer_.pop_front();
+        }
     }
+}
+
+bool H30IMU::readExact(uint8_t* buf, size_t n) {
+    size_t total = 0;
+    while (total < n && running_) {
+        ssize_t ret = ::read(fd_, buf + total, n - total);
+        if (ret < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                continue;
+            }
+            return false;
+        } else if (ret == 0) {
+            return false;
+        }
+        total += static_cast<size_t>(ret);
+    }
+    return total == n;
+}
+
+bool H30IMU::readFrame(IMUFrame& out) {
+    // 1) Sync on header bytes: 0x59 0x53
+    uint8_t prev = 0, b = 0;
+    bool synced = false;
+
+    while (running_) {
+        ssize_t ret = ::read(fd_, &b, 1);
+        if (ret == 1) {
+            if (prev == HDR0 && b == HDR1) {
+                synced = true;
+                break;
+            }
+            prev = b;
+        } else if (ret < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+                continue;
+            }
+            return false;
+        } else {
+            return false;
+        }
+    }
+    if (!synced) return false;
+
+    // 2) Read seq(2) + len(1)
+    uint8_t head[3];
+    if (!readExact(head, 3)) return false;
+
+    uint16_t seq    = read_u16_le(head);
+    uint8_t  length = head[2];
+
+    if (length > MAX_PAYLOAD) {
+        // Bad length — skip and resync
+        uint8_t dump[256];
+        (void)::read(fd_, dump, std::min((size_t)length, sizeof(dump)));
+        return false;
+    }
+
+    // 3) Read payload
+    std::vector<uint8_t> payload(length);
+    if (!readExact(payload.data(), length)) return false;
+
+    // 4) Read and verify checksum
+    uint8_t ck[2];
+    if (!readExact(ck, 2)) return false;
+
+    // Checksum covers: seq(2 bytes LE) + length(1) + payload
+    std::vector<uint8_t> chk_data;
+    chk_data.reserve(3 + length);
+    chk_data.push_back(static_cast<uint8_t>(seq & 0xFF));
+    chk_data.push_back(static_cast<uint8_t>((seq >> 8) & 0xFF));
+    chk_data.push_back(length);
+    chk_data.insert(chk_data.end(), payload.begin(), payload.end());
+
+    uint8_t ck1, ck2;
+    fletcher_checksum(chk_data, ck1, ck2);
+    if (ck1 != ck[0] || ck2 != ck[1]) {
+        return false;  // checksum mismatch, skip frame
+    }
+
+    // 5) Parse TLV blocks from payload
+    out = IMUFrame{};
+    out.seq = seq;
+
+    size_t i = 0;
+    while (i + 2 <= payload.size()) {
+        uint8_t data_id  = payload[i++];
+        uint8_t data_len = payload[i++];
+        if (i + data_len > payload.size()) break;
+
+        switch (data_id) {
+        case ID_EULER:
+            if (data_len == 12) {
+                int32_t pitch = read_i32_le(&payload[i + 0]);
+                int32_t roll  = read_i32_le(&payload[i + 4]);
+                int32_t yaw   = read_i32_le(&payload[i + 8]);
+                out.euler_deg[0] = pitch * 1e-6f;
+                out.euler_deg[1] = roll  * 1e-6f;
+                out.euler_deg[2] = yaw   * 1e-6f;
+                out.has_euler = true;
+            }
+            break;
+
+        case ID_QUAT:
+            if (data_len == 16) {
+                int32_t q0 = read_i32_le(&payload[i + 0]);
+                int32_t q1 = read_i32_le(&payload[i + 4]);
+                int32_t q2 = read_i32_le(&payload[i + 8]);
+                int32_t q3 = read_i32_le(&payload[i + 12]);
+                out.quat[0] = q0 * 1e-6f;  // w
+                out.quat[1] = q1 * 1e-6f;  // x
+                out.quat[2] = q2 * 1e-6f;  // y
+                out.quat[3] = q3 * 1e-6f;  // z
+                out.has_quat = true;
+            }
+            break;
+
+        default:
+            // Skip unknown TLV blocks (accel, gyro, mag, temp, etc.)
+            break;
+        }
+
+        i += data_len;
+    }
+
+    return true;
 }
 
 Eigen::Quaterniond H30IMU::getQuaternionAt(std::chrono::steady_clock::time_point tp) const {

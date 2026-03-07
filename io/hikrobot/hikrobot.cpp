@@ -116,29 +116,54 @@ void HikRobot::capture_start()
       }
 
       auto timestamp = std::chrono::steady_clock::now();
-      cv::Mat img(cv::Size(raw.stFrameInfo.nWidth, raw.stFrameInfo.nHeight), CV_8U, raw.pBufAddr);
-
-      cvt_param.nWidth = raw.stFrameInfo.nWidth;
-      cvt_param.nHeight = raw.stFrameInfo.nHeight;
-
-      cvt_param.pSrcData = raw.pBufAddr;
-      cvt_param.nSrcDataLen = raw.stFrameInfo.nFrameLen;
-      cvt_param.enSrcPixelType = raw.stFrameInfo.enPixelType;
-
-      cvt_param.pDstBuffer = img.data;
-      cvt_param.nDstBufferSize = img.total() * img.elemSize();
-      cvt_param.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
-
-      // ret = MV_CC_ConvertPixelType(handle_, &cvt_param);
       const auto & frame_info = raw.stFrameInfo;
       auto pixel_type = frame_info.enPixelType;
+
+      // Choose correct Mat type based on pixel format
+      int cv_type;
+      if (pixel_type == PixelType_Gvsp_BGR8_Packed ||
+          pixel_type == PixelType_Gvsp_RGB8_Packed) {
+        cv_type = CV_8UC3;
+      } else if (pixel_type == PixelType_Gvsp_YUV422_Packed) {
+        cv_type = CV_8UC2;
+      } else {
+        cv_type = CV_8UC1;  // Bayer and Mono are single-channel
+      }
+      cv::Mat img(cv::Size(frame_info.nWidth, frame_info.nHeight), cv_type, raw.pBufAddr);
+
+      // Log pixel type on first frame for debugging
+      static bool first_frame = true;
+      if (first_frame) {
+        tools::logger()->info("Camera pixel type: {:#x}, Mat type: CV_8UC{}", 
+                              static_cast<unsigned int>(pixel_type), CV_MAT_CN(cv_type));
+        first_frame = false;
+      }
+
       cv::Mat dst_image;
       const static std::unordered_map<MvGvspPixelType, cv::ColorConversionCodes> type_map = {
         {PixelType_Gvsp_BayerGR8, cv::COLOR_BayerGR2RGB},
         {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerRG2RGB},
         {PixelType_Gvsp_BayerGB8, cv::COLOR_BayerGB2RGB},
         {PixelType_Gvsp_BayerBG8, cv::COLOR_BayerBG2RGB}};
-      cv::cvtColor(img, dst_image, type_map.at(pixel_type));
+      auto it = type_map.find(pixel_type);
+      if (it == type_map.end()) {
+        // Handle non-Bayer formats without cvtColor
+        if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
+          dst_image = img.clone();
+        } else if (pixel_type == PixelType_Gvsp_RGB8_Packed) {
+          cv::cvtColor(img, dst_image, cv::COLOR_RGB2BGR);
+        } else if (pixel_type == PixelType_Gvsp_Mono8) {
+          cv::cvtColor(img, dst_image, cv::COLOR_GRAY2BGR);
+        } else if (pixel_type == PixelType_Gvsp_YUV422_Packed) {
+          cv::cvtColor(img, dst_image, cv::COLOR_YUV2BGR_YUYV);
+        } else {
+          tools::logger()->error("Unsupported pixel type: {:#x}", static_cast<unsigned int>(pixel_type));
+          ret = MV_CC_FreeImageBuffer(handle_, &raw);
+          continue;
+        }
+      } else {
+        cv::cvtColor(img, dst_image, it->second);
+      }
       img = dst_image;
 
       queue_.push({img, timestamp});
