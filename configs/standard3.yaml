@@ -37,7 +37,7 @@ max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
 
 #####-----aimer参数-----#####
-yaw_offset: 0 # degree -2.5
+yaw_offset: -2.5 # degree, corrects for camera/barrel horizontal misalignment
 pitch_offset: -2 # degree 2
 comming_angle: 55 # degree
 leaving_angle: 20 # degree
@@ -58,8 +58,8 @@ vid_pid: "2bdf:0001"
 
 #  Calibrated using calibrate_imu with armor plate reference.
 #  Converts gimbal FLU frame → H30 IMU body frame (FRD).
-#  Accounts for actual IMU mounting orientation behind the camera.
-R_gimbal2imubody: [-0.96113812, -0.23253301, -0.14880158, 0.24053914, -0.96989414, -0.038030099, -0.13547853, -0.072344782, 0.98813552]
+#  Accounts for actual IMU mounting orientation to the right of the camera.
+R_gimbal2imubody: [-0.99226547, 0.045153668, -0.11563035, -0.048713621, -0.9984161, 0.028147409, -0.11417624, 0.033562474, 0.99289342]
 
 # 重投影误差: 0.1820px
 camera_matrix: [1785.4881526822305, 0, 672.4806478241826, 0, 1785.026019470562, 559.89603224794314, 0, 0, 1]

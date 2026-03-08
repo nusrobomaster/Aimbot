@@ -624,8 +624,10 @@ int main(int argc, char * argv[])
     bool should_shoot = false;
     
     if (!targets.empty() && usb_comm.isOpen()) {
-        // Get gimbal position (current yaw/pitch from command)
-        Eigen::Vector3d gimbal_pos(command.yaw, command.pitch, 0);
+        // Pass the actual measured gimbal angles from IMU so the shooter can
+        // verify the gimbal has physically reached the commanded position before
+        // deciding to fire (gimbal alignment check).
+        Eigen::Vector3d gimbal_pos(ypr[0], ypr[1], 0);
         
         // Shooter decides if we should actually fire based on:
         // - If we're on target (within tolerance)
