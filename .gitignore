@@ -1,3 +1,6 @@
 build/
 .vscode/
 logs/
+
+# Ignore calibration results
+assets/img_with_q/ 

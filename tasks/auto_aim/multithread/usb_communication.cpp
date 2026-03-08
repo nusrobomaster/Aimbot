@@ -77,14 +77,6 @@ bool USBCommunication::configure(int baudrate) {
 bool USBCommunication::writeData(const uint8_t* data, size_t length) {
     if (!isOpen() || fd_ < 0) return false;
     
-    // Debug: show exactly what's being sent
-    std::cout << "[USB] TX (" << length << " bytes): ";
-    for (size_t i = 0; i < length; i++) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                  << (int)data[i] << " ";
-    }
-    std::cout << std::dec << std::endl;
-    
     ssize_t written = write(fd_, data, length);
     if (written == static_cast<ssize_t>(length)) {
         tcdrain(fd_);
@@ -103,15 +95,12 @@ bool USBCommunication::sendGimbalCommand(float yaw, float pitch) {
     
     cvGimbalCommandPacket* pkt = reinterpret_cast<cvGimbalCommandPacket*>(buffer + 2);
     pkt->yaw = yaw;
-    pkt->pitch = pitch - 0.04f;
+    pkt->pitch = pitch;
     
     // Calculate CRC over yaw + pitch (8 bytes)
     uint16_t crc = crc16(reinterpret_cast<const uint8_t*>(pkt), sizeof(cvGimbalCommandPacket) - 2);
     pkt->crc = crc;
-    
-    std::cout << "[USB] Gimbal: yaw=" << yaw << ", pitch=" << pitch 
-              << ", crc=0x" << std::hex << crc << std::dec << std::endl;
-    
+
     return writeData(buffer, sizeof(buffer));
 }
 

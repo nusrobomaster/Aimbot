@@ -573,6 +573,11 @@ int main(int argc, char * argv[])
     Eigen::Quaterniond q_raw = imu.getQuaternionAt(t - 1ms);
     Eigen::Quaterniond q_tared = q_zero.conjugate() * q_raw;
 
+    // For testing, use identity quaternion if no IMU
+    // if (q.coeffs().norm() == 0) {
+    //     q = Eigen::Quaterniond::Identity();
+    // }
+
     solver.set_R_gimbal2world(q_tared);
 
     Eigen::Vector3d ypr = tools::eulers(solver.R_gimbal2world(), 2, 1, 0);
@@ -725,11 +730,11 @@ int main(int argc, char * argv[])
                         }
                         
                         double yaw_err = tools::limit_rad(command.yaw - ypr[0]);
-                        double pitch_err = command.pitch - ypr[1];
-                        std::cout << "[USB] Sent: yaw_err=" << -yaw_err * 180.0 / M_PI 
+                        double pitch_err = -(command.pitch + ypr[1]);
+                        std::cout << "[USB] Sent: yaw_err=" << -yaw_err * 180.0 / M_PI
                                  << "° pitch_err=" << pitch_err * 180.0 / M_PI
-                                 << "° (cmd_yaw=" << command.yaw * 180.0 / M_PI
-                                 << "° gimbal_yaw=" << ypr[0] * 180.0 / M_PI
+                                 << "° (cmd_pitch=" << command.pitch * 180.0 / M_PI
+                                 << "° gimbal_pitch=" << ypr[1] * 180.0 / M_PI
                                  << "°) fire=" << (int)current_fire
                                  << " dist=" << distance << "m" << std::endl;
                     }
