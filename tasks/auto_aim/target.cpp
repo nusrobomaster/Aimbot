@@ -219,6 +219,20 @@ void Target::update_ypda(const Armor & armor, int id)
   const Eigen::VectorXd & ypr = armor.ypr_in_world;
   Eigen::VectorXd z{{ypd[0], ypd[1], ypd[2], ypr[0]}};  //获得观测量
 
+  // Measurement gate: reject PnP outliers (e.g. IPPE solution flips)
+  // Compute innovation and its covariance, then check NIS (chi-squared test)
+  if (update_count_ > 3) {
+    Eigen::VectorXd z_pred = h(ekf_.x);
+    Eigen::VectorXd innov = z_subtract(z, z_pred);
+    Eigen::MatrixXd S = H * ekf_.P * H.transpose() + R;
+    double nis = innov.transpose() * S.inverse() * innov;
+    // Chi-squared threshold: 4 DOF, 99.5% -> ~14.86
+    if (nis > 15.0) {
+      tools::logger()->debug("[Target] Measurement gated: NIS={:.1f}", nis);
+      return;
+    }
+  }
+
   ekf_.update(z, H, R, h, z_subtract);
 }
 

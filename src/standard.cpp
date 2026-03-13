@@ -11,12 +11,16 @@
 #include <iostream>
 #include <unistd.h>
 #include <thread>
+
+#include <rclcpp/rclcpp.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
+#include <std_msgs/msg/bool.hpp>
+
 #include "io/camera.hpp"
 #include "io/cboard.hpp"
 #include "io/h30_imu/h30_imu.hpp"  
 #include "tasks/auto_aim/aimer.hpp"
 #include "tasks/auto_aim/multithread/commandgener.hpp"
-#include "tasks/auto_aim/multithread/usb_communication.h"
 #include "tasks/auto_aim/shooter.hpp"
 #include "tasks/auto_aim/solver.hpp"
 #include "tasks/auto_aim/tracker.hpp"
@@ -437,10 +441,24 @@ void displayAutoAimResults(cv::Mat& img,
 
 int main(int argc, char * argv[])
 {
+  rclcpp::init(argc, argv);
+  auto ros_node = rclcpp::Node::make_shared("auto_aim_vision");
+
+  auto aimbot_pub = ros_node->create_publisher<geometry_msgs::msg::Vector3>("aimbot_cmd", 10);
+  auto fire_pub   = ros_node->create_publisher<std_msgs::msg::Bool>("fire_cmd", 10);
+
+  std::thread ros_spin_thread([&ros_node]() {
+    rclcpp::spin(ros_node);
+  });
+
+  tools::logger()->info("[ROS2] Node 'auto_aim_vision' started, publishing to aimbot_cmd / fire_cmd");
+
   cv::CommandLineParser cli(argc, argv, keys);
   auto config_path = cli.get<std::string>(0);
   if (cli.has("help") || config_path.empty()) {
     cli.printMessage();
+    rclcpp::shutdown();
+    ros_spin_thread.join();
     return 0;
   }
 
@@ -449,44 +467,15 @@ int main(int argc, char * argv[])
   tools::Recorder recorder;
 
   io::Camera camera(config_path);
-  // io::CBoard cboard(config_path); // Uncomment if using serial communication
   H30IMU imu("/dev/ttyACM1", 460800);
   if (!imu.start()) {
     tools::logger()->warn("Failed to start external IMU");
-}
+  }
   auto_aim::YOLO detector(config_path, false);
   auto_aim::Solver solver(config_path);
   auto_aim::Tracker tracker(config_path, solver);
   auto_aim::Aimer aimer(config_path);
   auto_aim::Shooter shooter(config_path);
-
-  // ============ USB COMMUNICATION SETUP ============
-  calibur::USBCommunication usb_comm;
-
-  std::string usb_port = "/dev/ttyACM0";
-  int baudrate = 115200;  // Match your MCU baud rate
-  
-  std::cout << "\n[USB] Attempting to open " << usb_port << " at " << baudrate << " baud" << std::endl;
-  
-  // Check if device exists
-  if (access(usb_port.c_str(), F_OK) != 0) {
-    std::cerr << "[USB] ERROR: " << usb_port << " does not exist!" << std::endl;
-    std::cerr << "[USB] Run: ls -la /dev/ttyACM* to see available devices" << std::endl;
-  } 
-  // Check permissions
-  else if (access(usb_port.c_str(), R_OK | W_OK) != 0) {
-    std::cerr << "[USB] ERROR: No read/write permission for " << usb_port << std::endl;
-    std::cerr << "[USB] Fix: sudo chmod 666 " << usb_port << std::endl;
-  }
-  // Try to open
-  else if (!usb_comm.open(usb_port, baudrate)) {
-    std::cerr << "[USB] ERROR: Failed to open " << usb_port << std::endl;
-    std::cerr << "[USB] Check if another program is using it: sudo lsof " << usb_port << std::endl;
-  } else {
-    std::cout << "[USB] Successfully connected to " << usb_port << std::endl;
-    usb_comm.flush();  // Clear any stale data
-  }
-  // =================================================
 
   cv::Mat img;
   Eigen::Quaterniond q;
@@ -501,21 +490,11 @@ int main(int argc, char * argv[])
   int frame_count = 0;
   float fps = 0.0f;
 
-  // ============ USB TIMING AND STATISTICS ============
-  auto last_usb_send = std::chrono::steady_clock::now();
-  const auto usb_interval = std::chrono::milliseconds(10); // 100Hz send rate
-  
-  // Statistics
-  int usb_send_count = 0;
-  int usb_error_count = 0;
-  int no_target_count = 0;
-  
-  // Track previous fire state (0 = stop, 1 = start)
-  uint8_t prev_fire_state = 0;
-  
-  // For shooter debug
+  // Track previous fire state for change-detection publishing
+  bool prev_fire_state = false;
   int shooter_decision_count = 0;
-  // ===================================================
+  int send_count = 0;
+  int no_target_count = 0;
 
   std::cout << "\n=== Auto-Aim Visualization System ===" << std::endl;
   std::cout << "Controls:" << std::endl;
@@ -573,6 +552,11 @@ int main(int argc, char * argv[])
     Eigen::Quaterniond q_raw = imu.getQuaternionAt(t - 1ms);
     Eigen::Quaterniond q_tared = q_zero.conjugate() * q_raw;
 
+    // For testing, use identity quaternion if no IMU
+    // if (q.coeffs().norm() == 0) {
+    //     q = Eigen::Quaterniond::Identity();
+    // }
+
     solver.set_R_gimbal2world(q_tared);
 
     Eigen::Vector3d ypr = tools::eulers(solver.R_gimbal2world(), 2, 1, 0);
@@ -622,174 +606,71 @@ int main(int argc, char * argv[])
     
     // ============ SHOOTER DECISION ============
     bool should_shoot = false;
-    
-    if (!targets.empty() && usb_comm.isOpen()) {
-        // Get gimbal position (current yaw/pitch from command)
+
+    if (!targets.empty()) {
         Eigen::Vector3d gimbal_pos(command.yaw, command.pitch, 0);
-        
-        // Shooter decides if we should actually fire based on:
-        // - If we're on target (within tolerance)
-        // - If command is stable
-        // - If aim point is valid
-        // - auto_fire = true (from config)
         should_shoot = shooter.shoot(command, aimer, targets, gimbal_pos);
-        
-        // Debug shooter decisions periodically
+
         shooter_decision_count++;
         if (shooter_decision_count % 50 == 0) {
             double distance = 0.0;
-            if (!targets.empty() && !targets.begin()->armor_xyza_list().empty()) {
+            if (!targets.begin()->armor_xyza_list().empty()) {
                 distance = targets.begin()->armor_xyza_list()[0].head(3).norm();
             }
-            std::cout << "[SHOOTER] Decision: " << (should_shoot ? "FIRE 🔫" : "HOLD ⏸️") 
-                      << " | distance=" << std::fixed << std::setprecision(2) << distance << "m"
+            std::cout << "[SHOOTER] " << (should_shoot ? "FIRE" : "HOLD")
+                      << " | dist=" << std::fixed << std::setprecision(2) << distance << "m"
                       << " | targets=" << targets.size()
-                      << " | aim_valid=" << aimer.debug_aim_point.valid
-                      << std::endl;
+                      << " | aim_valid=" << aimer.debug_aim_point.valid << std::endl;
         }
     }
-    // ==========================================
-    
-    // ============ USB SEND AT 100Hz ============
-    auto now = std::chrono::steady_clock::now();
-    auto usb_elapsed = now - last_usb_send;
-    
-    if (usb_elapsed >= usb_interval) {
-        bool gimbal_sent = false;
-        
-        if (usb_comm.isOpen()) {
-            // Convert fire command to uint8_t (0 or 1) - USE SHOOTER'S DECISION
-            uint8_t current_fire = should_shoot ? 1 : 0;
-            
-            // ALWAYS send gimbal command (either target angles or zero)
-            if (aimer.debug_aim_point.valid && !targets.empty()) {
-                // The aimer outputs ABSOLUTE world-frame angles, but the MCU
-                // has no IMU and cannot compute the error itself.
-                // We compute the relative error here:
-                //   yaw_error  = target_world_yaw  - gimbal_world_yaw
-                //   pitch_error = desired_pitch     - gimbal_world_pitch
-                //
-                // Sign convention conversion (FLU → MCU):
-                //   Aimbot FLU: positive yaw = LEFT,  positive pitch = UP
-                //   MCU:        positive yaw = RIGHT, positive pitch = UP
-                //   → negate yaw error for MCU
-                //
-                // command.pitch from aimer = -(trajectory_pitch + offset),
-                // so desired_pitch = -command.pitch.
-                // pitch_error = desired_pitch - current_pitch
-                //             = -command.pitch - ypr[1]
-                //             = -(command.pitch + ypr[1])
 
-                double yaw_error = tools::limit_rad(command.yaw - ypr[0]);
-                double pitch_error = -(command.pitch + ypr[1]);
+    // ============ PUBLISH TO stm32_bridge ============
+    {
+        geometry_msgs::msg::Vector3 aim_msg;
 
-                // Negate yaw to convert FLU → MCU convention (left-positive → right-positive)
-                float yaw_to_send   = static_cast<float>(-yaw_error);
-                float pitch_to_send = static_cast<float>(pitch_error);
+        if (aimer.debug_aim_point.valid && !targets.empty()) {
+            // Compute gimbal-relative errors (offsets) for the bridge
+            // FLU→MCU sign: negate yaw (left-positive → right-positive)
+            double yaw_error  = tools::limit_rad(command.yaw - ypr[0]);
+            double pitch_error = -(command.pitch + ypr[1]);
 
-                gimbal_sent = usb_comm.sendGimbalCommand(yaw_to_send, pitch_to_send);
-            } else {
-                // No target - send zero gimbal command (gimbal stays still)
-                gimbal_sent = usb_comm.sendGimbalCommand(0.0f, 0.0f);
-            }
-            
-            // Send firing command ONLY if state changed
-            if (current_fire != prev_fire_state) {
-                bool fire_sent = usb_comm.sendFiringCommand(current_fire);
-                
-                if (fire_sent) {
-                    prev_fire_state = current_fire;
-                    
-                    if (current_fire) {
-                        std::cout << "[USB] 🔫 FIRE command sent! (value=" << (int)current_fire << ")" << std::endl;
-                    } else {
-                        std::cout << "[USB] 🔫 STOP FIRE command sent!" << std::endl;
-                    }
-                } else {
-                    std::cout << "[USB] ❌ Failed to send firing command!" << std::endl;
-                }
-            }
-            
-            // Update statistics based on gimbal send
-            if (gimbal_sent) {
-                if (aimer.debug_aim_point.valid && !targets.empty()) {
-                    usb_send_count++;
-                    no_target_count = 0;
-                    
-                    // Print every 100th successful send
-                    if (usb_send_count % 100 == 0) {
-                        const auto& target = *targets.begin();
-                        float distance = 0.0f;
-                        if (!target.armor_xyza_list().empty()) {
-                            distance = target.armor_xyza_list()[0].head(3).norm();
-                        }
-                        
-                        double yaw_err = tools::limit_rad(command.yaw - ypr[0]);
-                        double pitch_err = command.pitch - ypr[1];
-                        std::cout << "[USB] Sent: yaw_err=" << -yaw_err * 180.0 / M_PI 
-                                 << "° pitch_err=" << pitch_err * 180.0 / M_PI
-                                 << "° (cmd_yaw=" << command.yaw * 180.0 / M_PI
-                                 << "° gimbal_yaw=" << ypr[0] * 180.0 / M_PI
-                                 << "°) fire=" << (int)current_fire
-                                 << " dist=" << distance << "m" << std::endl;
-                    }
-                } else {
-                    no_target_count++;
-                    
-                    // Print every 100th frame with no target
-                    if (no_target_count % 100 == 0) {
-                        std::cout << "[USB] No target - zero command" << std::endl;
-                    }
-                }
-            } else {
-                usb_error_count++;
-                if (usb_error_count % 100 == 0) {
-                    std::cerr << "[USB] ❌ Failed to send gimbal command (" << usb_error_count << " errors)" << std::endl;
-                    
-                    // Try to reconnect if too many errors
-                    if (usb_error_count > 1000) {
-                        std::cerr << "[USB] Too many errors, attempting to reconnect..." << std::endl;
-                        usb_comm.close();
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        usb_comm.open(usb_port, baudrate);
-                        usb_error_count = 0;
-                    }
-                }
-            }
-            
-            // Optional: Read any response from MCU (competition status, etc.)
-            uint8_t rx_buffer[64];
-            int bytes_read = usb_comm.receiveData(rx_buffer, sizeof(rx_buffer), 0);
-            if (bytes_read > 0) {
-                // Process incoming packets from MCU
-                static int rx_count = 0;
-                rx_count++;
-                
-                // Look for packets with magic byte 0x7F
-                for (int i = 0; i < bytes_read - 1; i++) {
-                    if (rx_buffer[i] == 0x7F) {  // USB_MAGIC_BYTE
-                        uint8_t packet_id = rx_buffer[i + 1];
-                        
-                        // Print every 100th received packet
-                        if (rx_count % 100 == 0) {
-                            std::cout << "[USB] Received packet ID: " << (int)packet_id 
-                                     << " from MCU" << std::endl;
-                        }
-                    }
-                }
+            aim_msg.x = -yaw_error;
+            aim_msg.y = pitch_error;
+            aim_msg.z = 0.0;
+
+            send_count++;
+            no_target_count = 0;
+            if (send_count % 100 == 0) {
+                const auto& target = *targets.begin();
+                float dist = target.armor_xyza_list().empty()
+                    ? 0.0f : target.armor_xyza_list()[0].head(3).norm();
+                std::cout << "[ROS2] Sent: yaw=" << aim_msg.x * 180.0 / M_PI
+                         << " pitch=" << aim_msg.y * 180.0 / M_PI
+                         << " fire=" << should_shoot
+                         << " dist=" << dist << "m" << std::endl;
             }
         } else {
-            // USB is not open - try to reconnect periodically
-            static int reconnect_counter = 0;
-            if (++reconnect_counter % 300 == 0) {  // Try every ~3 seconds at 100Hz
-                std::cout << "[USB] Attempting to reconnect to " << usb_port << std::endl;
-                usb_comm.open(usb_port, baudrate);
+            aim_msg.x = 0.0;
+            aim_msg.y = 0.0;
+            aim_msg.z = 0.0;
+
+            no_target_count++;
+            if (no_target_count % 100 == 0) {
+                std::cout << "[ROS2] No target - zero command" << std::endl;
             }
         }
-        
-        last_usb_send = now;
+
+        aimbot_pub->publish(aim_msg);
+
+        if (should_shoot != prev_fire_state) {
+            std_msgs::msg::Bool fire_msg;
+            fire_msg.data = should_shoot;
+            fire_pub->publish(fire_msg);
+            prev_fire_state = should_shoot;
+            std::cout << "[ROS2] Fire " << (should_shoot ? "START" : "STOP") << std::endl;
+        }
     }
-    // ============================================
+    // =================================================
     
     // Display results
     try {
@@ -813,15 +694,18 @@ int main(int argc, char * argv[])
     }
   }
 
-  // ============ CLEANUP ============
   // Send zero commands before exiting
-  if (usb_comm.isOpen()) {
-    std::cout << "[USB] Shutting down - sending zero commands..." << std::endl;
-    usb_comm.sendGimbalCommand(0.0f, 0.0f);
-    usb_comm.sendFiringCommand(0);
-    usb_comm.close();
-  }
-  // ================================
+  geometry_msgs::msg::Vector3 zero_aim;
+  zero_aim.x = 0.0; zero_aim.y = 0.0; zero_aim.z = 0.0;
+  aimbot_pub->publish(zero_aim);
+
+  std_msgs::msg::Bool stop_fire;
+  stop_fire.data = false;
+  fire_pub->publish(stop_fire);
+  tools::logger()->info("[ROS2] Sent zero commands before shutdown");
+
+  rclcpp::shutdown();
+  ros_spin_thread.join();
 
   cv::destroyAllWindows();
   tools::logger()->info("Program terminated successfully.");

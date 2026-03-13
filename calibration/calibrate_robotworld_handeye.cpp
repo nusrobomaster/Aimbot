@@ -14,20 +14,20 @@ const std::string keys =
   "{config-path c  | configs/calibration.yaml | yaml配置文件路径 }"
   "{@input-folder  | assets/img_with_q        | 输入文件夹路径   }";
 
-std::vector<cv::Point3f> centers_3d(const cv::Size & pattern_size, const float center_distance)
+std::vector<cv::Point3f> corners_3d(const cv::Size & pattern_size, const float square_size)
 {
-  std::vector<cv::Point3f> centers_3d;
+  std::vector<cv::Point3f> corners;
 
   for (int i = 0; i < pattern_size.height; i++) {
     for (int j = 0; j < pattern_size.width; j++) {
       float x = 0;
-      float y = (-j + 0.5 * pattern_size.width) * center_distance;
-      float z = (-i + 0.5 * pattern_size.height) * center_distance;
-      centers_3d.push_back({x, y, z});
+      float y = (-j + 0.5f * (pattern_size.width - 1)) * square_size;
+      float z = (-i + 0.5f * (pattern_size.height - 1)) * square_size;
+      corners.push_back({x, y, z});
     }
   }
 
-  return centers_3d;
+  return corners;
 }
 
 Eigen::Quaterniond read_q(const std::string & q_path)
@@ -48,7 +48,7 @@ void load(
   auto yaml = YAML::LoadFile(config_path);
   auto pattern_cols = yaml["pattern_cols"].as<int>();
   auto pattern_rows = yaml["pattern_rows"].as<int>();
-  auto center_distance_mm = yaml["center_distance_mm"].as<double>();
+  auto square_size_mm = yaml["square_size_mm"].as<double>();
   R_gimbal2imubody_data = yaml["R_gimbal2imubody"].as<std::vector<double>>();
   auto camera_matrix_data = yaml["camera_matrix"].as<std::vector<double>>();
   auto distort_coeffs_data = yaml["distort_coeffs"].as<std::vector<double>>();
@@ -58,18 +58,36 @@ void load(
   cv::Matx33d camera_matrix(camera_matrix_data.data());
   cv::Mat distort_coeffs(distort_coeffs_data);
 
+  // Tare: use first image's quaternion as zero reference (same as standard.cpp)
+  // This avoids issues with absolute quaternion conventions
+  Eigen::Quaterniond q_zero = Eigen::Quaterniond::Identity();
+  bool need_tare = true;
+
   for (int i = 1; true; i++) {
     // 读取图片和对应四元数
     auto img_path = fmt::format("{}/{}.jpg", input_folder, i);
     auto q_path = fmt::format("{}/{}.txt", input_folder, i);
     auto img = cv::imread(img_path);
-    Eigen::Quaterniond q = read_q(q_path);
+    Eigen::Quaterniond q_raw = read_q(q_path);
     if (img.empty()) break;
 
+    // Tare with first valid quaternion
+    if (need_tare) {
+      q_zero = q_raw;
+      need_tare = false;
+      fmt::print("[tare] q0 = ({:.4f}, {:.4f}, {:.4f}, {:.4f})\n",
+        q_zero.w(), q_zero.x(), q_zero.y(), q_zero.z());
+    }
+    Eigen::Quaterniond q_tared = q_zero.conjugate() * q_raw;
+
     // 计算云台的欧拉角
-    Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
-    Eigen::Matrix3d R_gimbal2world =
+    Eigen::Matrix3d R_imubody2imuabs = q_tared.toRotationMatrix();
+    Eigen::Matrix3d R_gimbal2world_raw =
       R_gimbal2imubody.transpose() * R_imubody2imuabs * R_gimbal2imubody;
+    // Fix H30 IMU yaw sign: D * R^T * D, D=diag(-1,-1,1)
+    Eigen::Vector3d d(-1, -1, 1);
+    Eigen::Matrix3d R_gimbal2world =
+      d.asDiagonal() * R_gimbal2world_raw.transpose() * d.asDiagonal();
     Eigen::Vector3d ypr = tools::eulers(R_gimbal2world, 2, 1, 0) * 57.3;  // degree
 
     // 在图片上显示云台的欧拉角，用来检验R_gimbal2imubody是否正确
@@ -78,15 +96,42 @@ void load(
     tools::draw_text(drawing, fmt::format("pitch {:.2f}", ypr[1]), {40, 80}, {0, 0, 255});
     tools::draw_text(drawing, fmt::format("roll  {:.2f}", ypr[2]), {40, 120}, {0, 0, 255});
 
-    // 识别标定板
-    std::vector<cv::Point2f> centers_2d;
-    auto success = cv::findCirclesGrid(img, pattern_size, centers_2d);  // 默认是对称圆点图案
+    // 识别标定板 (chessboard) - downscale for speed
+    constexpr double SCALE = 0.5;
+    cv::Mat small;
+    cv::resize(img, small, {}, SCALE, SCALE);
+
+    std::vector<cv::Point2f> corners_2d;
+    auto success = cv::findChessboardCorners(small, pattern_size, corners_2d,
+      cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK);
+    if (success) {
+      // Scale corners back to full resolution
+      for (auto & c : corners_2d) { c.x /= SCALE; c.y /= SCALE; }
+      cv::Mat gray;
+      cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+      cv::cornerSubPix(gray, corners_2d, cv::Size(11, 11), cv::Size(-1, -1),
+        cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::MAX_ITER, 30, 0.001));
+
+      // Fix 180° in-plane ambiguity for even x even pattern (8x6):
+      // Compare with previous image's corners to ensure consistent ordering.
+      // If first corner is closer to previous LAST corner, the ordering is flipped.
+      static std::vector<cv::Point2f> prev_corners;
+      if (!prev_corners.empty() && corners_2d.size() == prev_corners.size()) {
+        double dist_same = cv::norm(corners_2d.front() - prev_corners.front());
+        double dist_flip = cv::norm(corners_2d.front() - prev_corners.back());
+        if (dist_flip < dist_same) {
+          fmt::print("  -> flipping corners (in-plane 180° ambiguity)\n");
+          std::reverse(corners_2d.begin(), corners_2d.end());
+        }
+      }
+      prev_corners = corners_2d;
+    }
 
     // 显示识别结果
-    cv::drawChessboardCorners(drawing, pattern_size, centers_2d, success);
+    cv::drawChessboardCorners(drawing, pattern_size, corners_2d, success);
     cv::resize(drawing, drawing, {}, 0.5, 0.5);  // 显示时缩小图片尺寸
     cv::imshow("Press any to continue", drawing);
-    cv::waitKey(0);
+    cv::waitKey(500);  // show briefly, auto-advance
 
     // 输出识别结果
     fmt::print("[{}] {}\n", success ? "success" : "failure", img_path);
@@ -98,9 +143,14 @@ void load(
     cv::Mat R_world2gimbal_cv;
     cv::eigen2cv(R_world2gimbal, R_world2gimbal_cv);
     cv::Mat rvec, tvec;
-    auto centers_3d_ = centers_3d(pattern_size, center_distance_mm);
+    auto corners_3d_ = corners_3d(pattern_size, square_size_mm);
     cv::solvePnP(
-      centers_3d_, centers_2d, camera_matrix, distort_coeffs, rvec, tvec, false, cv::SOLVEPNP_IPPE);
+      corners_3d_, corners_2d, camera_matrix, distort_coeffs, rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+
+    // Print diagnostic info
+    fmt::print("  gimbal ypr: ({:.1f}, {:.1f}, {:.1f}) deg, tvec: ({:.1f}, {:.1f}, {:.1f}) mm\n",
+      ypr[0], ypr[1], ypr[2],
+      tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
 
     // 记录所需的数据
     R_world2gimbal_list.emplace_back(R_world2gimbal_cv);

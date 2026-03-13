@@ -32,6 +32,7 @@ public:
 private:
   Solver & solver_;
   Color enemy_color_;
+  double max_dt_;  // max frame interval before assuming camera offline (seconds)
   int min_detect_count_;
   int max_temp_lost_count_;
   int detect_count_;

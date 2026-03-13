@@ -48,7 +48,12 @@ Eigen::Matrix3d Solver::R_gimbal2world() const { return R_gimbal2world_; }
 void Solver::set_R_gimbal2world(const Eigen::Quaterniond & q)
 {
   Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
-  R_gimbal2world_ = R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
+  Eigen::Matrix3d R = R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
+  // Fix H30 IMU yaw sign: the H30 quaternion convention (world-to-body) and the
+  // calibrated R_gimbal2imubody (which absorbed a Rz(180°) offset) combine such that
+  // yaw is negated while pitch/roll are correct. The fix: D * R^T * D, D=diag(-1,-1,1).
+  Eigen::Vector3d d(-1, -1, 1);
+  R_gimbal2world_ = d.asDiagonal() * R.transpose() * d.asDiagonal();
 }
 
 //solvePnP（获得姿态）
@@ -57,10 +62,35 @@ void Solver::solve(Armor & armor) const
   const auto & object_points =
     (armor.type == ArmorType::big) ? BIG_ARMOR_POINTS : SMALL_ARMOR_POINTS;
 
-  cv::Vec3d rvec, tvec;
-  cv::solvePnP(
-    object_points, armor.points, camera_matrix_, distort_coeffs_, rvec, tvec, false,
-    cv::SOLVEPNP_IPPE);
+  // Use solvePnPGeneric to get both IPPE solutions for coplanar points.
+  // IPPE always returns 2 solutions; picking by reprojection error alone causes
+  // frame-to-frame flipping when the armor is nearly face-on (both errors similar).
+  std::vector<cv::Mat> rvecs, tvecs;
+  cv::Mat reproj_errors;
+  cv::solvePnPGeneric(
+    object_points, armor.points, camera_matrix_, distort_coeffs_, rvecs, tvecs, false,
+    cv::SOLVEPNP_IPPE, cv::noArray(), cv::noArray(), reproj_errors);
+
+  int best = 0;
+  if (tvecs.size() >= 2) {
+    bool valid0 = tvecs[0].at<double>(2) > 0;
+    bool valid1 = tvecs[1].at<double>(2) > 0;
+    if (valid0 && !valid1) {
+      best = 0;
+    } else if (!valid0 && valid1) {
+      best = 1;
+    } else if (valid0 && valid1 && has_prev_tvec_) {
+      // Both valid: pick the one closer to previous solve to avoid flipping
+      double d0 = cv::norm(tvecs[0], cv::Mat(prev_tvec_), cv::NORM_L2);
+      double d1 = cv::norm(tvecs[1], cv::Mat(prev_tvec_), cv::NORM_L2);
+      best = (d1 < d0) ? 1 : 0;
+    }
+  }
+
+  cv::Vec3d rvec(rvecs[best].at<double>(0), rvecs[best].at<double>(1), rvecs[best].at<double>(2));
+  cv::Vec3d tvec(tvecs[best].at<double>(0), tvecs[best].at<double>(1), tvecs[best].at<double>(2));
+  prev_tvec_ = tvec;
+  has_prev_tvec_ = true;
 
   Eigen::Vector3d xyz_in_camera;
   cv::cv2eigen(tvec, xyz_in_camera);
@@ -124,6 +154,14 @@ std::vector<cv::Point2f> Solver::reproject_armor(
   const auto & object_points = (type == ArmorType::big) ? BIG_ARMOR_POINTS : SMALL_ARMOR_POINTS;
   cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_, image_points);
   return image_points;
+}
+
+void Solver::getCameraParams(double & fx, double & fy, double & cx, double & cy) const
+{
+  fx = camera_matrix_.at<double>(0, 0);
+  fy = camera_matrix_.at<double>(1, 1);
+  cx = camera_matrix_.at<double>(0, 2);
+  cy = camera_matrix_.at<double>(1, 2);
 }
 
 double Solver::oupost_reprojection_error(Armor armor, const double & pitch)

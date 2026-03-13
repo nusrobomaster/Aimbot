@@ -20,8 +20,13 @@ public:
 
   void solve(Armor & armor) const;
 
+  void reset_prev_pose() const { has_prev_tvec_ = false; }
+
   std::vector<cv::Point2f> reproject_armor(
     const Eigen::Vector3d & xyz_in_world, double yaw, ArmorType type, ArmorName name) const;
+
+  /** Get camera intrinsics for pixel-to-angle conversion. */
+  void getCameraParams(double & fx, double & fy, double & cx, double & cy) const;
 
   double oupost_reprojection_error(Armor armor, const double & picth);
 
@@ -34,6 +39,10 @@ private:
   Eigen::Matrix3d R_camera2gimbal_;
   Eigen::Vector3d t_camera2gimbal_;
   Eigen::Matrix3d R_gimbal2world_;
+
+  // Previous PnP tvec for IPPE solution consistency (avoids two-solution flipping)
+  mutable cv::Vec3d prev_tvec_{0, 0, 0};
+  mutable bool has_prev_tvec_ = false;
 
   void optimize_yaw(Armor & armor) const;
 

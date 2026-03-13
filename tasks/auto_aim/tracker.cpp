@@ -38,6 +38,7 @@ std::list<Target> Tracker::track(
   if (state_ != "lost" && dt > 0.1) {
     tools::logger()->warn("[Tracker] Large dt: {:.3f}s", dt);
     state_ = "lost";
+    solver_.reset_prev_pose();
   }
   // 过滤掉非我方装甲板
   armors.remove_if([&](const auto_aim::Armor & a) { return a.color != enemy_color_; });
@@ -76,6 +77,7 @@ std::list<Target> Tracker::track(
   if (state_ != "lost" && target_.diverged()) {
     tools::logger()->debug("[Tracker] Target diverged!");
     state_ = "lost";
+    solver_.reset_prev_pose();
     return {};
   }
 
@@ -86,6 +88,7 @@ std::list<Target> Tracker::track(
     (0.4 * target_.ekf().window_size)) {
     tools::logger()->debug("[Target] Bad Converge Found!");
     state_ = "lost";
+    solver_.reset_prev_pose();
     return {};
   }
 
@@ -112,6 +115,7 @@ std::tuple<omniperception::DetectionResult, std::list<Target>> Tracker::track(
   if (state_ != "lost" && dt > 0.1) {
     tools::logger()->warn("[Tracker] Large dt: {:.3f}s", dt);
     state_ = "lost";
+    solver_.reset_prev_pose();
   }
 
   // 优先选择靠近图像中心的装甲板

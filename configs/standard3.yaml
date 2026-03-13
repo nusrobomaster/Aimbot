@@ -1,5 +1,5 @@
-#enemy_color: "red"
-enemy_color: "blue"
+enemy_color: "red"
+#enemy_color: "blue"
 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
@@ -8,7 +8,7 @@ yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
 device: CPU
-min_confidence: 0.75
+min_confidence: 0.5   # Lowered from 0.75 - increase if too many false detections
 use_traditional: true
 
 #####-----ROI-----#####
@@ -37,13 +37,13 @@ max_temp_lost_count: 15
 outpost_max_temp_lost_count: 75
 
 #####-----aimer参数-----#####
-yaw_offset: 0 # degree -2.5
-pitch_offset: -2 # degree 2
+yaw_offset: -2.5 # degree -2.5
+pitch_offset: 2 # degree
 comming_angle: 55 # degree
 leaving_angle: 20 # degree
 decision_speed: 7 # rad/s
 high_speed_delay_time: 0.0 # s
-low_speed_delay_time: 0.0 # s planner use this value
+low_speed_delay_time: 0.0 # stt planner use this value
 
 #####-----shooter参数-----#####
 first_tolerance: 3 # 近距离射击容差，degree
@@ -59,7 +59,7 @@ vid_pid: "2bdf:0001"
 #  Calibrated using calibrate_imu with armor plate reference.
 #  Converts gimbal FLU frame → H30 IMU body frame (FRD).
 #  Accounts for actual IMU mounting orientation behind the camera.
-R_gimbal2imubody: [-0.96113812, -0.23253301, -0.14880158, 0.24053914, -0.96989414, -0.038030099, -0.13547853, -0.072344782, 0.98813552]
+R_gimbal2imubody: [-0.99226547, 0.045153668, -0.11563035, -0.048713621, -0.9984161, 0.028147409, -0.11417624, 0.033562474, 0.99289342]
 
 # 重投影误差: 0.1820px
 camera_matrix: [1785.4881526822305, 0, 672.4806478241826, 0, 1785.026019470562, 559.89603224794314, 0, 0, 1]
@@ -68,10 +68,8 @@ distort_coeffs: [-0.076005079619881746, 0.11182817466388446, 0.00053622047877220
 # 相机同理想情况的偏角: yaw1.44 pitch-7.28 roll0.96 degree
 # 标定板到世界坐标系原点的水平距离: 1.13 m
 # 标定板同竖直摆放时的偏角: yaw7.61 pitch13.92 roll-0.46 degree
-R_camera2gimbal: [-0.027182119030230909, -0.12616154330853446, 0.99163723074269183, -0.99949106557517331, 0.019998323121329122, -0.024853106601381177, -0.016695575474690555, -0.99180811252093692, -0.12664093215554434]
-# t_camera2gimbal: [0.13160669975045827, 0.10377721766577375, 0.024908271912914642]
-# R_camera2gimbal: [0, 0, 0, 0, 0, 0, 0, 0, 0]
-t_camera2gimbal: [0, 0, 0]
+R_camera2gimbal: [-0.0091132455655696196, -0.13296469279629633, 0.99107887638918424, -0.99995241269607349, 0.0046625470541015804, -0.0085693055884999564, -0.0034815368104382221, -0.99110980780363322, -0.13300085630131389]
+t_camera2gimbal: [0.13160669975045827, 0.10377721766577375, 0.024908271912914642]
 #####-----cboard参数-----#####
 quaternion_canid: 0x100
 bullet_speed_canid: 0x101
@@ -93,7 +91,7 @@ Q_yaw: [9e6, 0]
 R_yaw: [1]
 
 max_pitch_acc: 100
-Q_pitch: [9e6, 0]
+Q_pitch: [1e5, 0]
 R_pitch: [1]
 
 #####-----buff_detector参数-----#####
