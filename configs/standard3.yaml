@@ -1,5 +1,5 @@
-#enemy_color: "red"
-enemy_color: "blue"
+enemy_color: "red"
+#enemy_color: "blue"
 
 #####-----神经网络参数-----#####
 yolo_name: yolov5
@@ -8,7 +8,7 @@ yolo11_model_path: assets/yolo11.xml
 yolov8_model_path: assets/yolov8.xml
 yolov5_model_path: assets/yolov5.xml
 device: CPU
-min_confidence: 0.75
+min_confidence: 0.5   # Lowered from 0.75 - increase if too many false detections
 use_traditional: true
 
 #####-----ROI-----#####

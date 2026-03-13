@@ -25,6 +25,9 @@ public:
   std::vector<cv::Point2f> reproject_armor(
     const Eigen::Vector3d & xyz_in_world, double yaw, ArmorType type, ArmorName name) const;
 
+  /** Get camera intrinsics for pixel-to-angle conversion. */
+  void getCameraParams(double & fx, double & fy, double & cx, double & cy) const;
+
   double oupost_reprojection_error(Armor armor, const double & picth);
 
   std::vector<cv::Point2f> world2pixel(const std::vector<cv::Point3f> & worldPoints);

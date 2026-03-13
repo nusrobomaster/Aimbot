@@ -156,6 +156,14 @@ std::vector<cv::Point2f> Solver::reproject_armor(
   return image_points;
 }
 
+void Solver::getCameraParams(double & fx, double & fy, double & cx, double & cy) const
+{
+  fx = camera_matrix_.at<double>(0, 0);
+  fy = camera_matrix_.at<double>(1, 1);
+  cx = camera_matrix_.at<double>(0, 2);
+  cy = camera_matrix_.at<double>(1, 2);
+}
+
 double Solver::oupost_reprojection_error(Armor armor, const double & pitch)
 {
   // solve
