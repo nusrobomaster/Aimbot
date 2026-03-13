@@ -5,6 +5,7 @@
 #include "yolos/yolo11.hpp"
 #include "yolos/yolov5.hpp"
 #include "yolos/yolov8.hpp"
+#include "yolos/yolo_0526_ort.hpp"
 
 namespace auto_aim
 {
@@ -23,6 +24,10 @@ YOLO::YOLO(const std::string & config_path, bool debug)
 
   else if (yolo_name == "yolov5") {
     yolo_ = std::make_unique<YOLOV5>(config_path, debug);
+  }
+
+  else if (yolo_name == "onnx0526") {
+    yolo_ = std::make_unique<YOLO_0526_ORT>(config_path, debug);
   }
 
   else {

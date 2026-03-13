@@ -118,6 +118,10 @@ if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND
     target_link_libraries(standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
     ament_target_dependencies(standard rclcpp std_msgs geometry_msgs)
 
+    add_executable(standard_onnx0526 src/standard_onnx0526.cpp)
+    target_link_libraries(standard_onnx0526 ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
+    ament_target_dependencies(standard_onnx0526 rclcpp std_msgs geometry_msgs)
+
     if(rosidl_typesupport_cpp_FOUND AND sp_msgs_FOUND)
         add_executable(sentry src/sentry.cpp)
         add_executable(sentry_bp src/sentry_bp.cpp)
