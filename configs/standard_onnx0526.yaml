@@ -1,0 +1,100 @@
+enemy_color: "red"
+
+#####-----Neural network parameters (ONNX 0526)-----#####
+yolo_name: onnx0526
+yolo_onnx_model_path: assets/0526.onnx
+yolo_conf_threshold: 0.4
+
+# Legacy models (unused by this config, kept for compatibility)
+classify_model: assets/tiny_resnet.onnx
+yolo11_model_path: assets/yolo11.xml
+yolov8_model_path: assets/yolov8.xml
+yolov5_model_path: assets/yolov5.xml
+device: CPU
+min_confidence: 0.5
+use_traditional: true
+
+#####-----ROI-----#####
+roi: 
+  x: 420
+  y: 50
+  width: 600
+  height: 600
+
+use_roi: false
+
+#####-----traditional detector parameters-----#####
+threshold: 150
+max_angle_error: 45
+min_lightbar_ratio: 1.5
+max_lightbar_ratio: 20
+min_lightbar_length: 8
+min_armor_ratio: 1
+max_armor_ratio: 5
+max_side_ratio: 1.5
+max_rectangular_error: 25
+
+#####-----tracker parameters-----#####
+min_detect_count: 5
+max_temp_lost_count: 15
+outpost_max_temp_lost_count: 75
+
+#####-----aimer parameters-----#####
+yaw_offset: -2.5
+pitch_offset: 2
+comming_angle: 55
+leaving_angle: 20
+decision_speed: 7
+high_speed_delay_time: 0.0
+low_speed_delay_time: 0.0
+
+#####-----shooter parameters-----#####
+first_tolerance: 3
+second_tolerance: 2
+judge_distance: 2
+auto_fire: true
+
+camera_name: "hikrobot"
+exposure_ms: 2.5
+gain: 16.9
+vid_pid: "2bdf:0001"
+
+R_gimbal2imubody: [-0.99226547, 0.045153668, -0.11563035, -0.048713621, -0.9984161, 0.028147409, -0.11417624, 0.033562474, 0.99289342]
+
+camera_matrix: [1785.4881526822305, 0, 672.4806478241826, 0, 1785.026019470562, 559.89603224794314, 0, 0, 1]
+distort_coeffs: [-0.076005079619881746, 0.11182817466388446, 0.0005362204787722057, -0.0027546300984895122, 0]
+
+R_camera2gimbal: [-0.0091132455655696196, -0.13296469279629633, 0.99107887638918424, -0.99995241269607349, 0.0046625470541015804, -0.0085693055884999564, -0.0034815368104382221, -0.99110980780363322, -0.13300085630131389]
+t_camera2gimbal: [0.13160669975045827, 0.10377721766577375, 0.024908271912914642]
+
+#####-----cboard parameters-----#####
+quaternion_canid: 0x100
+bullet_speed_canid: 0x101
+send_canid: 0xff
+can_interface: "can0"
+
+#####-----gimbal parameters-----#####
+com_port: "/dev/gimbal"
+yaw_kp: 0
+yaw_kd: 0
+pitch_kp: 0
+pitch_kd: 0
+
+#####-----planner-----#####
+fire_thresh: 0.0035
+
+max_yaw_acc: 50
+Q_yaw: [9e6, 0]
+R_yaw: [1]
+
+max_pitch_acc: 100
+Q_pitch: [1e5, 0]
+R_pitch: [1]
+
+#####-----buff_detector parameters-----#####
+model: "assets/yolo11_buff_int8.xml"
+
+#####-----buff_aimer parameters-----#####
+fire_gap_time: 0.700
+predict_time: 0.120
+
