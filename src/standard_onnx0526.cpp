@@ -220,7 +220,7 @@ int main(int argc, char* argv[]) {
   tools::Plotter plotter;
   tools::Recorder recorder;
   io::Camera camera(config_path);
-  H30IMU imu("/dev/ttyACM1", 460800);
+  H30IMU imu("/dev/ttyACM0", 460800);
   if (!imu.start()) tools::logger()->warn("Failed to start external IMU");
   auto_aim::YOLO detector(config_path, false);
   auto_aim::Solver solver(config_path);
