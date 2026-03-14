@@ -4,6 +4,7 @@ set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake")
 
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
 
+
 add_subdirectory(planner/tinympc)
 
 add_library(auto_aim OBJECT 
@@ -26,5 +27,9 @@ add_library(auto_aim OBJECT
     multithread/usb_communication.cpp
     planner/planner.cpp
 )
-
-target_link_libraries(auto_aim io openvino::runtime tinympcstatic)
+target_include_directories(auto_aim PRIVATE /usr/local/include/onnxruntime)
+target_compile_definitions(auto_aim PRIVATE
+    ORT_TENSORRT_EXECUTION_PROVIDER
+    ORT_CUDA_EXECUTION_PROVIDER
+)
+target_link_libraries(auto_aim io openvino::runtime tinympcstatic onnxruntime nvinfer nvinfer_plugin nvonnxparser)

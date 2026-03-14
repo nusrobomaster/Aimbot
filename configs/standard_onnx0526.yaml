@@ -2,8 +2,8 @@ enemy_color: "red"
 
 #####-----Neural network parameters (ONNX 0526)-----#####
 yolo_name: onnx0526
-yolo_onnx_model_path: assets/0526.onnx
-yolo_conf_threshold: 0.4
+yolo_onnx_model_path: assets/0526_v12.onnx
+yolo_conf_threshold: 0.8
 
 # Legacy models (unused by this config, kept for compatibility)
 classify_model: assets/tiny_resnet.onnx

@@ -113,11 +113,12 @@ find_package(rosidl_typesupport_cpp QUIET)
 find_package(sp_msgs QUIET)
 # 只有在找到 ROS 环境时才会添加 ROS2 相关目标
 if(ament_cmake_FOUND AND rclcpp_FOUND AND std_msgs_FOUND AND geometry_msgs_FOUND)
-    # standard uses ROS2 to publish to stm32_bridge
+    # standard: ROS2 → stm32_bridge (default config: configs/standard3.yaml)
     add_executable(standard src/standard.cpp)
     target_link_libraries(standard ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
     ament_target_dependencies(standard rclcpp std_msgs geometry_msgs)
 
+    # standard_onnx0526: same pipeline with 0526.onnx via ONNX Runtime (TensorRT/CUDA), default config: configs/standard_onnx0526.yaml
     add_executable(standard_onnx0526 src/standard_onnx0526.cpp)
     target_link_libraries(standard_onnx0526 ${OpenCV_LIBS} fmt::fmt yaml-cpp auto_aim auto_buff tools io)
     ament_target_dependencies(standard_onnx0526 rclcpp std_msgs geometry_msgs)

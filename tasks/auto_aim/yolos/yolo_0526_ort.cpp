@@ -24,26 +24,37 @@ YOLO_0526_ORT::YOLO_0526_ORT(const std::string & config_path, bool debug)
   // Enable high level optimizations
   session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-  // Try to enable TensorRT EP if built with it
-#if defined(ORT_TENSORRT_EXECUTION_PROVIDER)
+   // Try to enable TensorRT EP if built with it
+  #if defined(ORT_TENSORRT_EXECUTION_PROVIDER)
   {
-    OrtTensorRTProviderOptionsV2 trt_options;
-    std::memset(&trt_options, 0, sizeof(trt_options));
-    trt_options.trt_fp16_enable = 1;  // Prefer FP16 on Jetson
-    Ort::ThrowOnError(
-      OrtSessionOptionsAppendExecutionProvider_TensorRT_V2(session_options_, &trt_options));
+    OrtTensorRTProviderOptionsV2* trt_options;
+    Ort::ThrowOnError(Ort::GetApi().CreateTensorRTProviderOptions(&trt_options));
+    
+    std::vector<const char*> keys{
+      "device_id",
+      "trt_fp16_enable",
+      "trt_engine_cache_enable",
+      "trt_engine_cache_path"
+    };
+    std::vector<const char*> values{
+      "0",
+      "1",
+      "1",
+      "/home/slavito2/Code/Aimbot/assets/trt_cache"
+    };
+    Ort::ThrowOnError(Ort::GetApi().UpdateTensorRTProviderOptions(
+      trt_options, keys.data(), values.data(), keys.size()));
+    session_options_.AppendExecutionProvider_TensorRT_V2(*trt_options);
+    Ort::GetApi().ReleaseTensorRTProviderOptions(trt_options);
   }
-#endif
-
-  // Try to enable CUDA EP if available
-#if defined(ORT_CUDA_EXECUTION_PROVIDER)
-  {
-    OrtCUDAProviderOptions cuda_options;
-    std::memset(&cuda_options, 0, sizeof(cuda_options));
-    Ort::ThrowOnError(
-      OrtSessionOptionsAppendExecutionProvider_CUDA(session_options_, &cuda_options));
-  }
-#endif
+  #endif
+    // Try to enable CUDA EP if available
+  #if defined(ORT_CUDA_EXECUTION_PROVIDER)
+    {
+      Ort::ThrowOnError(
+        OrtSessionOptionsAppendExecutionProvider_CUDA(session_options_, 0));
+    }
+  #endif
 
   tools::logger()->info("[YOLO_0526_ORT] Loading ONNX model from {}", model_path_);
   session_ = std::make_unique<Ort::Session>(env_, model_path_.c_str(), session_options_);
@@ -101,7 +112,7 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
     return {};
   }
 
-  // Preprocess: letterbox → RGB → float32/255 → NCHW
+  // Preprocess: letterbox → RGB → float16/255 → NCHW
   float scale = 1.0f;
   int pad_w = 0;
   int pad_h = 0;
@@ -111,17 +122,16 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
   cv::Mat rgb;
   cv::cvtColor(padded, rgb, cv::COLOR_BGR2RGB);
 
-  std::vector<float> input_blob(3 * INPUT_H * INPUT_W);
+  std::vector<Ort::Float16_t> input_blob(3 * INPUT_H * INPUT_W);
   const int c_step = INPUT_H * INPUT_W;
 
   for (int y = 0; y < INPUT_H; ++y) {
     const auto * row_ptr = rgb.ptr<cv::Vec3b>(y);
     for (int x = 0; x < INPUT_W; ++x) {
       const cv::Vec3b & p = row_ptr[x];
-      // p = (R, G, B)
-      input_blob[0 * c_step + y * INPUT_W + x] = static_cast<float>(p[0]) / 255.0f;
-      input_blob[1 * c_step + y * INPUT_W + x] = static_cast<float>(p[1]) / 255.0f;
-      input_blob[2 * c_step + y * INPUT_W + x] = static_cast<float>(p[2]) / 255.0f;
+      input_blob[0 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[0]) / 255.0f);
+      input_blob[1 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[1]) / 255.0f);
+      input_blob[2 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[2]) / 255.0f);
     }
   }
 
@@ -129,7 +139,7 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
     OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault);
 
   std::array<int64_t, 4> input_shape = {1, 3, INPUT_H, INPUT_W};
-  Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+  Ort::Value input_tensor = Ort::Value::CreateTensor<Ort::Float16_t>(
     mem_info, input_blob.data(), input_blob.size(),
     input_shape.data(), input_shape.size());
 
@@ -144,15 +154,20 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
   }
 
   Ort::Value & out_tensor = output_tensors[0];
-  float * out_data = out_tensor.GetTensorMutableData<float>();
   auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
   auto out_shape = type_info.GetShape();
 
+  auto elem_type = type_info.GetElementType();
+  
+  tools::logger()->info("[YOLO_0526_ORT] Output shape: {}x{}x{}", out_shape[0], out_shape[1], out_shape[2]);
+  
   if (out_shape.size() != 3) {
     tools::logger()->warn(
       "[YOLO_0526_ORT] Unexpected output rank: {}", static_cast<int>(out_shape.size()));
     return {};
   }
+
+  float * out_data = out_tensor.GetTensorMutableData<float>();
 
   // Expected: (1, 25200, 23)
   const size_t num_rows = static_cast<size_t>(out_shape[1]);
@@ -168,12 +183,7 @@ std::list<Armor> YOLO_0526_ORT::decode(
   float scale, int pad_w, int pad_h,
   const cv::Size & orig_size) const
 {
-  // Per row layout:
-  // [0:8]   4 keypoints (x0,y0,x1,y1,x2,y2,x3,y3)
-  // [8]     confidence
-  // [9:13]  color scores (4)
-  // [13:23] digit scores (10)
-  const int stride = 23;
+  const int stride = 22;
 
   std::vector<cv::Rect> boxes;
   std::vector<float> confidences;
@@ -197,38 +207,26 @@ std::list<Armor> YOLO_0526_ORT::decode(
       continue;
     }
 
-    std::vector<cv::Point2f> kps;
-    kps.reserve(4);
-
-    float min_x = 1e9f;
-    float min_y = 1e9f;
-    float max_x = -1e9f;
-    float max_y = -1e9f;
-
+        std::vector<cv::Point2f> kps_raw(4);
     for (int k = 0; k < 4; ++k) {
-      float px = row[2 * k + 0];
-      float py = row[2 * k + 1];
-
-      // Undo letterbox (same as Python)
-      float x = (px - static_cast<float>(pad_w)) / scale;
-      float y = (py - static_cast<float>(pad_h)) / scale;
-
-      x = std::clamp(x, 0.0f, static_cast<float>(img_w - 1));
-      y = std::clamp(y, 0.0f, static_cast<float>(img_h - 1));
-
-      min_x = std::min(min_x, x);
-      min_y = std::min(min_y, y);
-      max_x = std::max(max_x, x);
-      max_y = std::max(max_y, y);
-
-      kps.emplace_back(x, y);
+      float px = (row[2 * k + 0] - static_cast<float>(pad_w)) / scale;
+      float py = (row[2 * k + 1] - static_cast<float>(pad_h)) / scale;
+      px = std::clamp(px, 0.0f, static_cast<float>(img_w - 1));
+      py = std::clamp(py, 0.0f, static_cast<float>(img_h - 1));
+      kps_raw[k] = cv::Point2f(px, py);
     }
+    // Reorder to match YOLOv5 convention: 0, 3, 2, 1
+    std::vector<cv::Point2f> kps = {kps_raw[0], kps_raw[3], kps_raw[2], kps_raw[1]};
+    float min_x = std::min({kps[0].x, kps[1].x, kps[2].x, kps[3].x});
+    float min_y = std::min({kps[0].y, kps[1].y, kps[2].y, kps[3].y});
+    float max_x = std::max({kps[0].x, kps[1].x, kps[2].x, kps[3].x});
+    float max_y = std::max({kps[0].y, kps[1].y, kps[2].y, kps[3].y});
+
 
     if (max_x <= min_x || max_y <= min_y) {
       continue;
     }
 
-    // Color argmax over [9:13)
     int best_color = 0;
     float best_color_score = row[9];
     for (int c = 1; c < 4; ++c) {
@@ -239,16 +237,30 @@ std::list<Armor> YOLO_0526_ORT::decode(
       }
     }
 
-    // Digit argmax over [13:23)
     int best_digit = 0;
     float best_digit_score = row[13];
-    for (int d = 1; d < 10; ++d) {
+    for (int d = 1; d < 9; ++d) {
       float s = row[13 + d];
       if (s > best_digit_score) {
         best_digit_score = s;
         best_digit = d;
       }
     }
+
+    const int digit_to_name[] = {
+      static_cast<int>(ArmorName::outpost),
+      static_cast<int>(ArmorName::one),
+      static_cast<int>(ArmorName::two),
+      static_cast<int>(ArmorName::three),
+      static_cast<int>(ArmorName::four),
+      static_cast<int>(ArmorName::five),
+      static_cast<int>(ArmorName::base),
+      static_cast<int>(ArmorName::sentry),
+      static_cast<int>(ArmorName::sentry),
+    };
+
+    if (best_digit < 0 || best_digit > 8) best_digit = 0;
+    int mapped_digit = digit_to_name[best_digit];
 
     const int x = static_cast<int>(std::round(min_x));
     const int y = static_cast<int>(std::round(min_y));
@@ -258,12 +270,11 @@ std::list<Armor> YOLO_0526_ORT::decode(
     boxes.emplace_back(x, y, w, h);
     confidences.emplace_back(conf);
     color_ids.emplace_back(best_color);
-    digit_ids.emplace_back(best_digit);
+    digit_ids.emplace_back(mapped_digit);
     all_keypoints.emplace_back(std::move(kps));
   }
 
   std::list<Armor> armors;
-  armors.clear();
 
   for (size_t i = 0; i < boxes.size(); ++i) {
     armors.emplace_back(
@@ -275,4 +286,3 @@ std::list<Armor> YOLO_0526_ORT::decode(
 }
 
 }  // namespace auto_aim
-
