@@ -9,7 +9,38 @@ using namespace std::chrono_literals;
 namespace io
 {
 HikRobot::HikRobot(double exposure_ms, double gain, const std::string & vid_pid)
-: exposure_us_(exposure_ms * 1e3), gain_(gain), queue_(1), daemon_quit_(false), vid_(-1), pid_(-1)
+: exposure_us_(exposure_ms * 1e3), gain_(gain), queue_(1), daemon_quit_(false), vid_(-1), pid_(-1),
+  use_bayer_mvs_convert_(true), acquisition_frame_rate_(165.0)
+{
+  set_vid_pid(vid_pid);
+  if (libusb_init(NULL)) tools::logger()->warn("Unable to init libusb!");
+
+  daemon_thread_ = std::thread{[this] {
+    tools::logger()->info("HikRobot's daemon thread started.");
+
+    capture_start();
+
+    while (!daemon_quit_) {
+      std::this_thread::sleep_for(100ms);
+
+      if (capturing_) continue;
+
+      capture_stop();
+      reset_usb();
+      capture_start();
+    }
+
+    capture_stop();
+
+    tools::logger()->info("HikRobot's daemon thread stopped.");
+  }};
+}
+
+HikRobot::HikRobot(
+  double exposure_ms, double gain, const std::string & vid_pid, bool use_bayer_mvs_convert,
+  double acquisition_frame_rate)
+: exposure_us_(exposure_ms * 1e3), gain_(gain), queue_(1), daemon_quit_(false), vid_(-1), pid_(-1),
+  use_bayer_mvs_convert_(use_bayer_mvs_convert), acquisition_frame_rate_(acquisition_frame_rate)
 {
   set_vid_pid(vid_pid);
   if (libusb_init(NULL)) tools::logger()->warn("Unable to init libusb!");
@@ -87,7 +118,43 @@ void HikRobot::capture_start()
   set_enum_value("GainAuto", MV_GAIN_MODE_OFF);
   set_float_value("ExposureTime", exposure_us_);
   set_float_value("Gain", gain_);
-  MV_CC_SetFrameRate(handle_, 150);
+
+  // pb2025-style: use AcquisitionFrameRateEnable + AcquisitionFrameRate (165 Hz default)
+  ret = MV_CC_SetBoolValue(handle_, "AcquisitionFrameRateEnable", true);
+  if (ret == MV_OK) {
+    ret = MV_CC_SetFloatValue(handle_, "AcquisitionFrameRate", acquisition_frame_rate_);
+    if (ret == MV_OK) {
+      tools::logger()->info("Acquisition frame rate set to {:.1f} Hz", acquisition_frame_rate_);
+    }
+  }
+  if (ret != MV_OK) {
+    MV_CC_SetFrameRate(handle_, static_cast<float>(acquisition_frame_rate_));
+  }
+
+  // pb2025-style: set BayerRG8 for faster transfer + MVS SDK conversion
+  if (use_bayer_mvs_convert_) {
+    ret = MV_CC_SetEnumValueByString(handle_, "ADCBitDepth", "Bits_8");
+    if (ret != MV_OK) {
+      tools::logger()->warn("MV_CC_SetEnumValueByString(ADCBitDepth) failed: {:#x}", ret);
+    }
+    ret = MV_CC_SetEnumValueByString(handle_, "PixelFormat", "BayerRG8");
+    if (ret == MV_OK) {
+      tools::logger()->info("Pixel format set to BayerRG8 (using MVS ConvertPixelType)");
+    } else {
+      tools::logger()->warn("BayerRG8 not supported, falling back to cv::cvtColor");
+      use_bayer_mvs_convert_ = false;
+    }
+  }
+
+  ret = MV_CC_GetImageInfo(handle_, &img_info_);
+  if (ret != MV_OK) {
+    tools::logger()->warn("MV_CC_GetImageInfo failed: {:#x}", ret);
+  } else if (use_bayer_mvs_convert_) {
+    rgb_buffer_.resize(img_info_.nHeightMax * img_info_.nWidthMax * 3);
+    convert_param_.nWidth = img_info_.nWidthValue;
+    convert_param_.nHeight = img_info_.nHeightValue;
+    convert_param_.enDstPixelType = PixelType_Gvsp_BGR8_Packed;
+  }
 
   ret = MV_CC_StartGrabbing(handle_);
   if (ret != MV_OK) {
@@ -101,15 +168,11 @@ void HikRobot::capture_start()
     capturing_ = true;
 
     MV_FRAME_OUT raw;
-    MV_CC_PIXEL_CONVERT_PARAM cvt_param;
+    const unsigned int get_buffer_timeout_ms = 1000;
 
     while (!capture_quit_) {
-      std::this_thread::sleep_for(1ms);
-
-      unsigned int ret;
-      unsigned int nMsec = 100;
-
-      ret = MV_CC_GetImageBuffer(handle_, &raw, nMsec);
+      // pb2025-style: NO sleep - run as fast as camera delivers frames
+      unsigned int ret = MV_CC_GetImageBuffer(handle_, &raw, get_buffer_timeout_ms);
       if (ret != MV_OK) {
         tools::logger()->warn("MV_CC_GetImageBuffer failed: {:#x}", ret);
         break;
@@ -119,54 +182,76 @@ void HikRobot::capture_start()
       const auto & frame_info = raw.stFrameInfo;
       auto pixel_type = frame_info.enPixelType;
 
-      // Choose correct Mat type based on pixel format
-      int cv_type;
-      if (pixel_type == PixelType_Gvsp_BGR8_Packed ||
-          pixel_type == PixelType_Gvsp_RGB8_Packed) {
-        cv_type = CV_8UC3;
-      } else if (pixel_type == PixelType_Gvsp_YUV422_Packed) {
-        cv_type = CV_8UC2;
-      } else {
-        cv_type = CV_8UC1;  // Bayer and Mono are single-channel
-      }
-      cv::Mat img(cv::Size(frame_info.nWidth, frame_info.nHeight), cv_type, raw.pBufAddr);
-
-      // Log pixel type on first frame for debugging
-      static bool first_frame = true;
-      if (first_frame) {
-        tools::logger()->info("Camera pixel type: {:#x}, Mat type: CV_8UC{}", 
-                              static_cast<unsigned int>(pixel_type), CV_MAT_CN(cv_type));
-        first_frame = false;
-      }
-
       cv::Mat dst_image;
-      const static std::unordered_map<MvGvspPixelType, cv::ColorConversionCodes> type_map = {
-        {PixelType_Gvsp_BayerGR8, cv::COLOR_BayerGR2RGB},
-        {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerRG2RGB},
-        {PixelType_Gvsp_BayerGB8, cv::COLOR_BayerGB2RGB},
-        {PixelType_Gvsp_BayerBG8, cv::COLOR_BayerBG2RGB}};
-      auto it = type_map.find(pixel_type);
-      if (it == type_map.end()) {
-        // Handle non-Bayer formats without cvtColor
-        if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
-          dst_image = img.clone();
-        } else if (pixel_type == PixelType_Gvsp_RGB8_Packed) {
-          cv::cvtColor(img, dst_image, cv::COLOR_RGB2BGR);
-        } else if (pixel_type == PixelType_Gvsp_Mono8) {
-          cv::cvtColor(img, dst_image, cv::COLOR_GRAY2BGR);
-        } else if (pixel_type == PixelType_Gvsp_YUV422_Packed) {
-          cv::cvtColor(img, dst_image, cv::COLOR_YUV2BGR_YUYV);
-        } else {
-          tools::logger()->error("Unsupported pixel type: {:#x}", static_cast<unsigned int>(pixel_type));
-          ret = MV_CC_FreeImageBuffer(handle_, &raw);
-          continue;
-        }
-      } else {
-        cv::cvtColor(img, dst_image, it->second);
-      }
-      img = dst_image;
 
-      queue_.push({img, timestamp});
+      if (use_bayer_mvs_convert_ && rgb_buffer_.size() >= frame_info.nWidth * frame_info.nHeight * 3) {
+        // pb2025-style: use MVS SDK ConvertPixelType (faster than cv::cvtColor)
+        convert_param_.enSrcPixelType = pixel_type;
+        convert_param_.pSrcData = raw.pBufAddr;
+        convert_param_.nSrcDataLen = frame_info.nFrameLen;
+        convert_param_.pDstBuffer = rgb_buffer_.data();
+        convert_param_.nDstBufferSize = static_cast<unsigned int>(rgb_buffer_.size());
+        convert_param_.nWidth = frame_info.nWidth;
+        convert_param_.nHeight = frame_info.nHeight;
+
+        ret = MV_CC_ConvertPixelType(handle_, &convert_param_);
+        if (ret == MV_OK) {
+          dst_image = cv::Mat(
+            frame_info.nHeight, frame_info.nWidth, CV_8UC3, rgb_buffer_.data()).clone();
+        } else {
+          use_bayer_mvs_convert_ = false;
+          tools::logger()->warn("MV_CC_ConvertPixelType failed: {:#x}, falling back to cv::cvtColor", ret);
+        }
+      }
+
+      if (!use_bayer_mvs_convert_ || dst_image.empty()) {
+        // Fallback: OpenCV conversion (original Aimbot path)
+        int cv_type;
+        if (pixel_type == PixelType_Gvsp_BGR8_Packed ||
+            pixel_type == PixelType_Gvsp_RGB8_Packed) {
+          cv_type = CV_8UC3;
+        } else if (pixel_type == PixelType_Gvsp_YUV422_Packed) {
+          cv_type = CV_8UC2;
+        } else {
+          cv_type = CV_8UC1;
+        }
+        cv::Mat img(cv::Size(frame_info.nWidth, frame_info.nHeight), cv_type, raw.pBufAddr);
+
+        static bool first_frame = true;
+        if (first_frame) {
+          tools::logger()->info(
+            "Camera pixel type: {:#x}, Mat type: CV_8UC{}",
+            static_cast<unsigned int>(pixel_type), CV_MAT_CN(cv_type));
+          first_frame = false;
+        }
+
+        const static std::unordered_map<MvGvspPixelType, cv::ColorConversionCodes> type_map = {
+          {PixelType_Gvsp_BayerGR8, cv::COLOR_BayerGR2BGR},
+          {PixelType_Gvsp_BayerRG8, cv::COLOR_BayerRG2BGR},
+          {PixelType_Gvsp_BayerGB8, cv::COLOR_BayerGB2BGR},
+          {PixelType_Gvsp_BayerBG8, cv::COLOR_BayerBG2BGR}};
+        auto it = type_map.find(pixel_type);
+        if (it == type_map.end()) {
+          if (pixel_type == PixelType_Gvsp_BGR8_Packed) {
+            dst_image = img.clone();
+          } else if (pixel_type == PixelType_Gvsp_RGB8_Packed) {
+            cv::cvtColor(img, dst_image, cv::COLOR_RGB2BGR);
+          } else if (pixel_type == PixelType_Gvsp_Mono8) {
+            cv::cvtColor(img, dst_image, cv::COLOR_GRAY2BGR);
+          } else if (pixel_type == PixelType_Gvsp_YUV422_Packed) {
+            cv::cvtColor(img, dst_image, cv::COLOR_YUV2BGR_YUYV);
+          } else {
+            tools::logger()->error(
+              "Unsupported pixel type: {:#x}", static_cast<unsigned int>(pixel_type));
+            MV_CC_FreeImageBuffer(handle_, &raw);
+            continue;
+          }
+        } else {
+          cv::cvtColor(img, dst_image, it->second);
+        }
+      }
+
+      queue_.push({dst_image, timestamp});
 
       ret = MV_CC_FreeImageBuffer(handle_, &raw);
       if (ret != MV_OK) {

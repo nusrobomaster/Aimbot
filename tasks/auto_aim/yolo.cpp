@@ -6,6 +6,7 @@
 #include "yolos/yolov5.hpp"
 #include "yolos/yolov8.hpp"
 #include "yolos/yolo_0526_ort.hpp"
+#include "yolos/yolo_0526_trt.hpp"
 
 namespace auto_aim
 {
@@ -27,7 +28,11 @@ YOLO::YOLO(const std::string & config_path, bool debug)
   }
 
   else if (yolo_name == "onnx0526") {
-    yolo_ = std::make_unique<YOLO_0526_ORT>(config_path, debug);
+    if (yaml["yolo_engine_path"] && !yaml["yolo_engine_path"].as<std::string>().empty()) {
+      yolo_ = std::make_unique<YOLO_0526_TRT>(config_path, debug);
+    } else {
+      yolo_ = std::make_unique<YOLO_0526_ORT>(config_path, debug);
+    }
   }
 
   else {

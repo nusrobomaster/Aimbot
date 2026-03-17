@@ -2,8 +2,10 @@ enemy_color: "red"
 
 #####-----Neural network parameters (ONNX 0526)-----#####
 yolo_name: onnx0526
+# Use TensorRT engine for higher FPS; leave empty to use ONNX via ONNX Runtime
+yolo_engine_path: assets/0526_v12_fp16.engine
 yolo_onnx_model_path: assets/0526_v12.onnx
-yolo_conf_threshold: 0.8
+yolo_conf_threshold: 0.45
 
 # Legacy models (unused by this config, kept for compatibility)
 classify_model: assets/tiny_resnet.onnx
@@ -35,18 +37,24 @@ max_side_ratio: 1.5
 max_rectangular_error: 25
 
 #####-----tracker parameters-----#####
-min_detect_count: 5
-max_temp_lost_count: 15
-outpost_max_temp_lost_count: 75
+min_detect_count: 2
+max_temp_lost_count: 10
+outpost_max_temp_lost_count: 30
 
 #####-----aimer parameters-----#####
-yaw_offset: 2
-pitch_offset: 0
+yaw_offset: 0
+pitch_offset: 4
 comming_angle: 55
 leaving_angle: 20
 decision_speed: 7
 high_speed_delay_time: 0.0
 low_speed_delay_time: 0.0
+
+#####-----command smoothing-----#####
+# EMA alpha: lower = smoother but more lag, higher = faster but jerkier (0.1 ~ 0.6)
+cmd_smooth_alpha: 0.4
+# Dead zone in radians — commands smaller than this are zeroed (~0.03 deg)
+cmd_dead_zone: 0.0005
 
 #####-----shooter parameters-----#####
 first_tolerance: 3
@@ -55,7 +63,7 @@ judge_distance: 2
 auto_fire: true
 
 camera_name: "hikrobot"
-exposure_ms: 2.5
+exposure_ms: 4.0
 gain: 16.9
 vid_pid: "2bdf:0001"
 

@@ -41,6 +41,10 @@ camera_name: "hikrobot"
 exposure_ms: 2
 gain: 16
 vid_pid: "2bdf:0001"
+# pb2025-style fast grabbing (default: true). Set false to use original cv::cvtColor path
+use_bayer_mvs_convert: true
+# Frame rate in Hz (default: 165). Uses MVS AcquisitionFrameRate when supported
+acquisition_frame_rate: 165.0
 
 #####-----传统方法参数-----#####
 threshold: 150

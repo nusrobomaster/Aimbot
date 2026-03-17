@@ -79,6 +79,11 @@ YOLO_0526_ORT::YOLO_0526_ORT(const std::string & config_path, bool debug)
   tools::logger()->info(
     "[YOLO_0526_ORT] Model loaded, inputs: {}, outputs: {}",
     num_input_nodes, num_output_nodes);
+
+  // Pre-allocate buffers to avoid per-frame allocation in detect()
+  input_blob_.resize(3 * INPUT_H * INPUT_W);
+  letterbox_buf_.create(cv::Size(INPUT_W, INPUT_H), CV_8UC3);
+  rgb_buf_.create(cv::Size(INPUT_W, INPUT_H), CV_8UC3);
 }
 
 void YOLO_0526_ORT::letterbox(
@@ -101,7 +106,9 @@ void YOLO_0526_ORT::letterbox(
   cv::Mat resized;
   cv::resize(img, resized, cv::Size(new_w, new_h));
 
-  out = cv::Mat(cv::Size(INPUT_W, INPUT_H), CV_8UC3, cv::Scalar(114, 114, 114));
+  if (out.cols != INPUT_W || out.rows != INPUT_H || out.type() != CV_8UC3)
+    out.create(cv::Size(INPUT_W, INPUT_H), CV_8UC3);
+  out.setTo(cv::Scalar(114, 114, 114));
   resized.copyTo(out(cv::Rect(pad_w, pad_h, new_w, new_h)));
 }
 
@@ -112,26 +119,21 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
     return {};
   }
 
-  // Preprocess: letterbox → RGB → float16/255 → NCHW
+  // Preprocess: letterbox → RGB → float16/255 → NCHW (use pre-allocated buffers)
   float scale = 1.0f;
   int pad_w = 0;
   int pad_h = 0;
-  cv::Mat padded;
-  letterbox(raw_img, padded, scale, pad_w, pad_h);
+  letterbox(raw_img, letterbox_buf_, scale, pad_w, pad_h);
+  cv::cvtColor(letterbox_buf_, rgb_buf_, cv::COLOR_BGR2RGB);
 
-  cv::Mat rgb;
-  cv::cvtColor(padded, rgb, cv::COLOR_BGR2RGB);
-
-  std::vector<Ort::Float16_t> input_blob(3 * INPUT_H * INPUT_W);
   const int c_step = INPUT_H * INPUT_W;
-
   for (int y = 0; y < INPUT_H; ++y) {
-    const auto * row_ptr = rgb.ptr<cv::Vec3b>(y);
+    const auto * row_ptr = rgb_buf_.ptr<cv::Vec3b>(y);
     for (int x = 0; x < INPUT_W; ++x) {
       const cv::Vec3b & p = row_ptr[x];
-      input_blob[0 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[0]) / 255.0f);
-      input_blob[1 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[1]) / 255.0f);
-      input_blob[2 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[2]) / 255.0f);
+      input_blob_[0 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[0]) / 255.0f);
+      input_blob_[1 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[1]) / 255.0f);
+      input_blob_[2 * c_step + y * INPUT_W + x] = Ort::Float16_t(static_cast<float>(p[2]) / 255.0f);
     }
   }
 
@@ -140,7 +142,7 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
 
   std::array<int64_t, 4> input_shape = {1, 3, INPUT_H, INPUT_W};
   Ort::Value input_tensor = Ort::Value::CreateTensor<Ort::Float16_t>(
-    mem_info, input_blob.data(), input_blob.size(),
+    mem_info, input_blob_.data(), input_blob_.size(),
     input_shape.data(), input_shape.size());
 
   auto output_tensors = session_->Run(
@@ -157,10 +159,6 @@ std::list<Armor> YOLO_0526_ORT::detect(const cv::Mat & raw_img, int /*frame_coun
   auto type_info = out_tensor.GetTensorTypeAndShapeInfo();
   auto out_shape = type_info.GetShape();
 
-  auto elem_type = type_info.GetElementType();
-  
-  tools::logger()->info("[YOLO_0526_ORT] Output shape: {}x{}x{}", out_shape[0], out_shape[1], out_shape[2]);
-  
   if (out_shape.size() != 3) {
     tools::logger()->warn(
       "[YOLO_0526_ORT] Unexpected output rank: {}", static_cast<int>(out_shape.size()));
@@ -203,11 +201,10 @@ std::list<Armor> YOLO_0526_ORT::decode(
   for (size_t i = 0; i < num_rows; ++i) {
     const float * row = output + i * stride;
     const float conf = row[8];
-    if (conf < conf_thresh) {
+    if (conf < conf_thresh)
       continue;
-    }
 
-        std::vector<cv::Point2f> kps_raw(4);
+    std::vector<cv::Point2f> kps_raw(4);
     for (int k = 0; k < 4; ++k) {
       float px = (row[2 * k + 0] - static_cast<float>(pad_w)) / scale;
       float py = (row[2 * k + 1] - static_cast<float>(pad_h)) / scale;
@@ -215,17 +212,14 @@ std::list<Armor> YOLO_0526_ORT::decode(
       py = std::clamp(py, 0.0f, static_cast<float>(img_h - 1));
       kps_raw[k] = cv::Point2f(px, py);
     }
-    // Reorder to match YOLOv5 convention: 0, 3, 2, 1
     std::vector<cv::Point2f> kps = {kps_raw[0], kps_raw[3], kps_raw[2], kps_raw[1]};
     float min_x = std::min({kps[0].x, kps[1].x, kps[2].x, kps[3].x});
     float min_y = std::min({kps[0].y, kps[1].y, kps[2].y, kps[3].y});
     float max_x = std::max({kps[0].x, kps[1].x, kps[2].x, kps[3].x});
     float max_y = std::max({kps[0].y, kps[1].y, kps[2].y, kps[3].y});
 
-
-    if (max_x <= min_x || max_y <= min_y) {
+    if (max_x <= min_x || max_y <= min_y)
       continue;
-    }
 
     int best_color = 0;
     float best_color_score = row[9];
@@ -247,20 +241,8 @@ std::list<Armor> YOLO_0526_ORT::decode(
       }
     }
 
-    const int digit_to_name[] = {
-      static_cast<int>(ArmorName::outpost),
-      static_cast<int>(ArmorName::one),
-      static_cast<int>(ArmorName::two),
-      static_cast<int>(ArmorName::three),
-      static_cast<int>(ArmorName::four),
-      static_cast<int>(ArmorName::five),
-      static_cast<int>(ArmorName::base),
-      static_cast<int>(ArmorName::sentry),
-      static_cast<int>(ArmorName::sentry),
-    };
-
     if (best_digit < 0 || best_digit > 8) best_digit = 0;
-    int mapped_digit = digit_to_name[best_digit];
+    if (best_color < 0 || best_color > 3) best_color = 0;
 
     const int x = static_cast<int>(std::round(min_x));
     const int y = static_cast<int>(std::round(min_y));
@@ -270,18 +252,16 @@ std::list<Armor> YOLO_0526_ORT::decode(
     boxes.emplace_back(x, y, w, h);
     confidences.emplace_back(conf);
     color_ids.emplace_back(best_color);
-    digit_ids.emplace_back(mapped_digit);
+    digit_ids.emplace_back(best_digit);
     all_keypoints.emplace_back(std::move(kps));
   }
 
+  std::vector<int> nms_indices;
+  cv::dnn::NMSBoxes(boxes, confidences, conf_thresh, 0.3f, nms_indices);
+
   std::list<Armor> armors;
-
-  for (size_t i = 0; i < boxes.size(); ++i) {
-    armors.emplace_back(
-      color_ids[i], digit_ids[i], confidences[i],
-      boxes[i], all_keypoints[i]);
-  }
-
+  for (int i : nms_indices)
+    armors.emplace_back(color_ids[i], digit_ids[i], confidences[i], boxes[i], all_keypoints[i]);
   return armors;
 }
 

@@ -6,8 +6,10 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "MvCameraControl.h"
+#include "ObsoleteCamParams.h"
 #include "io/camera.hpp"
 #include "tools/thread_safe_queue.hpp"
 
@@ -17,6 +19,9 @@ class HikRobot : public CameraBase
 {
 public:
   HikRobot(double exposure_ms, double gain, const std::string & vid_pid);
+  HikRobot(
+    double exposure_ms, double gain, const std::string & vid_pid, bool use_bayer_mvs_convert,
+    double acquisition_frame_rate);
   ~HikRobot() override;
   void read(cv::Mat & img, std::chrono::steady_clock::time_point & timestamp) override;
 
@@ -29,6 +34,8 @@ private:
 
   double exposure_us_;
   double gain_;
+  bool use_bayer_mvs_convert_;
+  double acquisition_frame_rate_;
 
   std::thread daemon_thread_;
   std::atomic<bool> daemon_quit_;
@@ -40,6 +47,10 @@ private:
   tools::ThreadSafeQueue<CameraData> queue_;
 
   int vid_, pid_;
+
+  MV_IMAGE_BASIC_INFO img_info_;
+  MV_CC_PIXEL_CONVERT_PARAM convert_param_;
+  std::vector<unsigned char> rgb_buffer_;
 
   void capture_start();
   void capture_stop();

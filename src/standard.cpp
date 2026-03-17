@@ -442,16 +442,16 @@ void displayAutoAimResults(cv::Mat& img,
 int main(int argc, char * argv[])
 {
   rclcpp::init(argc, argv);
-  auto ros_node = rclcpp::Node::make_shared("auto_aim_vision");
+  auto ros_node = rclcpp::Node::make_shared("calibur_usb_bridge");
 
-  auto aimbot_pub = ros_node->create_publisher<geometry_msgs::msg::Vector3>("aimbot_cmd", 10);
-  auto fire_pub   = ros_node->create_publisher<std_msgs::msg::Bool>("fire_cmd", 10);
+  auto aimbot_pub = ros_node->create_publisher<geometry_msgs::msg::Vector3>("cmd_gimbal", 10);
+  auto fire_pub   = ros_node->create_publisher<std_msgs::msg::Bool>("cmd_fire", 10);
 
   std::thread ros_spin_thread([&ros_node]() {
     rclcpp::spin(ros_node);
   });
 
-  tools::logger()->info("[ROS2] Node 'auto_aim_vision' started, publishing to aimbot_cmd / fire_cmd");
+  tools::logger()->info("[ROS2] Node 'calibur_usb_bridge' started, publishing to cmd_gimbal / cmd_fire");
 
   cv::CommandLineParser cli(argc, argv, keys);
   auto config_path = cli.get<std::string>(0);
